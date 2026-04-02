@@ -3,6 +3,10 @@ mod common;
 use std::{
     fs,
     process::{Command, Stdio},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -10,7 +14,7 @@ use std::{
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
-use common::new_run_control;
+use common::{new_run_control, new_run_control_with_interrupt};
 use headless::{
     config::GlobalConfig,
     error::AppError,
@@ -111,6 +115,67 @@ fn bash_output_is_capped_without_changing_exit_status() {
     assert_eq!(payload["stdout_truncated"], true);
     assert_eq!(payload["stderr"], "");
     assert!(payload["note"].as_str().unwrap().contains("truncated"));
+}
+
+#[test]
+fn bash_interrupt_kills_the_process_group() {
+    let temp = TempDir::new().expect("tempdir");
+    let cwd = temp.path();
+    let run_dir = cwd.join("run");
+    fs::create_dir_all(&run_dir).expect("run dir");
+
+    let config = GlobalConfig {
+        artifact_preview_bytes: 4_096,
+        ..test_config(cwd)
+    };
+    let interrupted = Arc::new(AtomicBool::new(false));
+    let run_control =
+        new_run_control_with_interrupt(&config, Duration::from_secs(5), Arc::clone(&interrupted));
+    let context = ToolContext::new(
+        cwd,
+        &run_dir,
+        &config,
+        false,
+        &config.shell,
+        &config.shell_args,
+        &run_control,
+    );
+    let child_pid_path = cwd.join("child.pid");
+    let command = format!(
+        "sleep 5 & child=$!; echo $child > {}; wait $child",
+        child_pid_path.display()
+    );
+
+    thread::spawn(move || {
+        thread::sleep(Duration::from_millis(50));
+        interrupted.store(true, Ordering::SeqCst);
+    });
+
+    let started = Instant::now();
+    let error = execute_tool(
+        &context,
+        &["bash".to_string()],
+        "bash",
+        &json!({ "command": command }),
+    )
+    .expect_err("bash interrupt");
+    assert!(matches!(error, AppError::Runtime(_)));
+    assert!(started.elapsed() < Duration::from_secs(3));
+
+    let child_pid = fs::read_to_string(&child_pid_path)
+        .expect("child pid")
+        .trim()
+        .to_string();
+    thread::sleep(Duration::from_millis(100));
+    let status = Command::new("kill")
+        .args(["-0", &child_pid])
+        .stderr(Stdio::null())
+        .status()
+        .expect("kill -0");
+    assert!(
+        !status.success(),
+        "interrupted child process should be gone"
+    );
 }
 
 #[test]

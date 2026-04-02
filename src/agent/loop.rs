@@ -1,8 +1,4 @@
-use std::{
-    sync::Arc,
-    sync::atomic::AtomicBool,
-    time::Duration,
-};
+use std::{sync::Arc, sync::atomic::AtomicBool, time::Duration};
 
 use serde_json::json;
 

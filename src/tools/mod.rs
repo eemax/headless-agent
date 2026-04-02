@@ -97,9 +97,7 @@ impl RunControl {
     }
 
     pub fn remaining_budget(&self) -> Result<Duration, AppError> {
-        if self.interrupted.load(Ordering::Relaxed) {
-            return Err(AppError::Runtime("interrupted by signal".to_string()));
-        }
+        self.check_interrupted()?;
         let now = Instant::now();
         if now >= self.deadline {
             return Err(AppError::Timeout(format!(
@@ -108,6 +106,13 @@ impl RunControl {
             )));
         }
         Ok(self.deadline.saturating_duration_since(now))
+    }
+
+    pub fn check_interrupted(&self) -> Result<(), AppError> {
+        if self.interrupted.load(Ordering::Relaxed) {
+            return Err(AppError::Runtime("interrupted by signal".to_string()));
+        }
+        Ok(())
     }
 
     pub fn ensure_mutating_access(&self) -> Result<(), AppError> {
@@ -181,6 +186,10 @@ impl<'a> ToolContext<'a> {
 
     pub fn remaining_budget(&self) -> Result<Duration, AppError> {
         self.run_control.remaining_budget()
+    }
+
+    pub fn check_interrupted(&self) -> Result<(), AppError> {
+        self.run_control.check_interrupted()
     }
 }
 

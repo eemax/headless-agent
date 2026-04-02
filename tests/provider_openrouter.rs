@@ -23,7 +23,8 @@ fn openrouter_request_includes_reasoning_and_tool_definitions() {
             }
         ]
     }))]);
-    let client = OpenRouterClient::new(server.url(), "test-key".to_string(), Duration::from_secs(5));
+    let client =
+        OpenRouterClient::new(server.url(), "test-key".to_string(), Duration::from_secs(5));
     let response = client
         .send_chat(ChatRequest {
             session_id: "session-1",
@@ -72,7 +73,8 @@ fn openrouter_maps_timeout_status_to_timeout_errors() {
         }),
         delay_ms: 0,
     }]);
-    let client = OpenRouterClient::new(server.url(), "test-key".to_string(), Duration::from_secs(5));
+    let client =
+        OpenRouterClient::new(server.url(), "test-key".to_string(), Duration::from_secs(5));
     let error = client
         .send_chat(ChatRequest {
             session_id: "session-1",

@@ -48,7 +48,12 @@ fn read_file_truncates_at_default_line_cap_and_reports_total() {
     assert_eq!(payload["end_line"], 2000);
     assert_eq!(payload["truncated"], true);
     assert!(payload["note"].as_str().unwrap().contains("3000 lines"));
-    assert!(payload["note"].as_str().unwrap().contains("start_line/end_line"));
+    assert!(
+        payload["note"]
+            .as_str()
+            .unwrap()
+            .contains("start_line/end_line")
+    );
 }
 
 #[test]
@@ -91,6 +96,49 @@ fn read_file_explicit_range_bypasses_default_cap() {
     let text = payload["content"].as_str().expect("content");
     assert!(text.contains("line 2900"));
     assert!(text.contains("line 3000"));
+}
+
+#[test]
+fn read_file_explicit_range_beyond_eof_clamps_end_line() {
+    let temp = TempDir::new().expect("tempdir");
+    let cwd = temp.path();
+    let run_dir = cwd.join("run");
+    fs::create_dir_all(&run_dir).expect("run dir");
+
+    let mut content = String::new();
+    for i in 1..=50 {
+        content.push_str(&format!("line {i}\n"));
+    }
+    fs::write(cwd.join("small.txt"), &content).expect("small file");
+
+    let config = large_output_config(cwd);
+    let run_control = new_run_control(&config, Duration::from_secs(5));
+    let context = ToolContext::new(
+        cwd,
+        &run_dir,
+        &config,
+        false,
+        &config.shell,
+        &config.shell_args,
+        &run_control,
+    );
+    let execution = execute_tool(
+        &context,
+        &["read_file".to_string()],
+        "read_file",
+        &json!({ "path": "small.txt", "start_line": 45, "end_line": 80 }),
+    )
+    .expect("read execution");
+    let payload: Value = serde_json::from_str(&execution.content).expect("json");
+    assert_eq!(payload["ok"], true);
+    assert_eq!(payload["total_lines"], 50);
+    assert_eq!(payload["start_line"], 45);
+    assert_eq!(payload["end_line"], 50);
+    assert!(payload.get("truncated").is_none());
+    let text = payload["content"].as_str().expect("content");
+    assert!(text.contains("line 45"));
+    assert!(text.contains("line 50"));
+    assert!(!text.contains("line 44"));
 }
 
 #[test]

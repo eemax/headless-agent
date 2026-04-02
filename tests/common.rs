@@ -173,6 +173,14 @@ impl Default for TestWorkspace {
 }
 
 pub fn new_run_control(config: &GlobalConfig, timeout: Duration) -> RunControl {
+    new_run_control_with_interrupt(config, timeout, Arc::new(AtomicBool::new(false)))
+}
+
+pub fn new_run_control_with_interrupt(
+    config: &GlobalConfig,
+    timeout: Duration,
+    interrupted: Arc<AtomicBool>,
+) -> RunControl {
     let store = SessionStore::new(config);
     store.ensure_root().expect("ensure sessions");
     let session = store.create_session().expect("create session");
@@ -181,7 +189,7 @@ pub fn new_run_control(config: &GlobalConfig, timeout: Duration) -> RunControl {
         session.session_id,
         session.revision,
         timeout,
-        Arc::new(AtomicBool::new(false)),
+        interrupted,
     )
 }
 

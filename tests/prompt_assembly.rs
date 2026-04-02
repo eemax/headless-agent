@@ -100,10 +100,7 @@ fn history_filtering_keeps_only_user_and_final_assistant_from_prior_runs() {
     assert_eq!(result.messages[0].content.as_deref(), Some("system prompt"));
 
     assert_eq!(result.messages[1].role, MessageRole::User);
-    assert_eq!(
-        result.messages[1].content.as_deref(),
-        Some("fix the bug")
-    );
+    assert_eq!(result.messages[1].content.as_deref(), Some("fix the bug"));
 
     assert_eq!(result.messages[2].role, MessageRole::Assistant);
     assert_eq!(

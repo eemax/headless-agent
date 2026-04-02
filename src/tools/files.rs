@@ -1,4 +1,7 @@
-use std::fs;
+use std::{
+    fs::{self, File},
+    io::{BufRead, BufReader},
+};
 
 use serde_json::{Value, json};
 
@@ -61,42 +64,47 @@ pub fn read_file(context: &ToolContext<'_>, arguments: &Value) -> Result<Value, 
     let _ = context.remaining_budget()?;
     let path = require_string(arguments, "path")?;
     let path = resolve_path(context.cwd, &path);
-    let content = fs::read_to_string(&path)
-        .map_err(|err| AppError::Tool(format!("failed to read file {}: {err}", path.display())))?;
-
-    let lines: Vec<&str> = content.lines().collect();
-    let total_lines = lines.len();
-    let explicit_range =
-        optional_u64(arguments, "start_line").is_some() || optional_u64(arguments, "end_line").is_some();
+    let explicit_range = optional_u64(arguments, "start_line").is_some()
+        || optional_u64(arguments, "end_line").is_some();
     let start_line = optional_u64(arguments, "start_line").unwrap_or(1) as usize;
     let end_line = optional_u64(arguments, "end_line").map(|value| value as usize);
+    let file = File::open(&path)
+        .map_err(|err| AppError::Tool(format!("failed to read file {}: {err}", path.display())))?;
+    let reader = BufReader::new(file);
+    let mut selected = String::new();
+    let mut total_lines = 0usize;
 
-    let (selected, effective_end, truncated) = if let Some(end_line) = end_line {
-        let sel: Vec<&str> = lines
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| {
-                let n = i + 1;
-                n >= start_line && n <= end_line
-            })
-            .map(|(_, l)| *l)
-            .collect();
-        let eff_end = end_line.min(total_lines);
-        (sel.join("\n"), eff_end, false)
+    for line in reader.lines() {
+        let line = line.map_err(|err| {
+            AppError::Tool(format!("failed to read file {}: {err}", path.display()))
+        })?;
+        total_lines += 1;
+
+        let include = if let Some(end_line) = end_line {
+            total_lines >= start_line && total_lines <= end_line
+        } else if explicit_range {
+            total_lines >= start_line
+        } else {
+            total_lines <= DEFAULT_MAX_LINES
+        };
+
+        if include {
+            if !selected.is_empty() {
+                selected.push('\n');
+            }
+            selected.push_str(&line);
+        }
+    }
+
+    let (effective_end, truncated) = if let Some(end_line) = end_line {
+        (end_line.min(total_lines), false)
     } else if explicit_range {
-        let sel: Vec<&str> = lines
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| i + 1 >= start_line)
-            .map(|(_, l)| *l)
-            .collect();
-        (sel.join("\n"), total_lines, false)
+        (total_lines, false)
     } else {
-        let cap = DEFAULT_MAX_LINES;
-        let trunc = total_lines > cap;
-        let take = if trunc { cap } else { total_lines };
-        let sel: Vec<&str> = lines[..take].to_vec();
-        (sel.join("\n"), take, trunc)
+        (
+            DEFAULT_MAX_LINES.min(total_lines),
+            total_lines > DEFAULT_MAX_LINES,
+        )
     };
 
     let mut result = json!({

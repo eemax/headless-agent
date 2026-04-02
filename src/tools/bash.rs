@@ -64,6 +64,13 @@ pub fn run_bash(context: &ToolContext<'_>, arguments: &Value) -> Result<Value, A
         {
             break status;
         }
+        if let Err(err) = context.check_interrupted() {
+            kill_child(&mut child, &command)?;
+            let _ = child.wait();
+            let _ = collect_reader(stdout_handle);
+            let _ = collect_reader(stderr_handle);
+            return Err(err);
+        }
         if Instant::now() >= deadline {
             kill_child(&mut child, &command)?;
             let _ = child.wait();
