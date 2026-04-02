@@ -99,6 +99,42 @@ fn openrouter_maps_timeout_status_to_timeout_errors() {
 }
 
 #[test]
+fn non_timeout_http_error_maps_to_provider_error() {
+    let server = FakeOpenRouter::start(vec![ResponseSpec {
+        status: 500,
+        body: json!({
+            "error": {
+                "message": "internal failure"
+            }
+        }),
+        delay_ms: 0,
+    }]);
+    let client =
+        OpenRouterClient::new(server.url(), "test-key".to_string(), Duration::from_secs(5));
+    let error = client
+        .send_chat(ChatRequest {
+            session_id: "session-1",
+            model: "openai/gpt-4.1",
+            effort: Effort::Medium,
+            messages: &[PromptMessage {
+                role: MessageRole::User,
+                content: Some("hello".to_string()),
+                name: None,
+                tool_call_id: None,
+                tool_calls: Vec::new(),
+            }],
+            tools: &[],
+            max_output_tokens: 128,
+        })
+        .expect_err("expected provider error");
+
+    match error {
+        AppError::Provider(message) => assert!(message.contains("internal failure")),
+        other => panic!("expected provider error, got {other:?}"),
+    }
+}
+
+#[test]
 #[ignore]
 fn openrouter_live_smoke_test() {
     let api_key = match env::var("OPENROUTER_API_KEY") {

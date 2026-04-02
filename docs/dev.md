@@ -7,10 +7,9 @@ This repo is designed so a fresh engineer or agent can make progress by reading 
 Read these in order before making structural changes:
 
 1. [README.md](/Users/ysera/headless-agent/README.md)
-2. [IMPLEMENTATION_SPEC.md](/Users/ysera/headless-agent/IMPLEMENTATION_SPEC.md)
-3. [docs/architecture.md](/Users/ysera/headless-agent/docs/architecture.md)
-4. [src/app.rs](/Users/ysera/headless-agent/src/app.rs)
-5. the module you plan to change
+2. [docs/architecture.md](/Users/ysera/headless-agent/docs/architecture.md)
+3. [src/app.rs](/Users/ysera/headless-agent/src/app.rs)
+4. the module you plan to change
 
 If you are changing behavior, update docs alongside code whenever the user-facing contract changes.
 
@@ -82,9 +81,19 @@ Useful targeted runs:
 
 ```bash
 cargo test --test cli_run
+cargo test --test agent_loop
+cargo test --test agent_role_loading
 cargo test --test session_jsonl
-cargo test --test tools_bash
+cargo test --test prompt_assembly
+cargo test --test output_contract
 cargo test --test provider_openrouter
+cargo test --test tools_bash
+cargo test --test tools_core
+cargo test --test tools_files
+cargo test --test tools_glob
+cargo test --test tools_grep
+cargo test --test tools_patch
+cargo test --test version
 ```
 
 The provider test strategy is intentional:
@@ -147,7 +156,3 @@ When user-facing behavior changes, update:
 - [README.md](/Users/ysera/headless-agent/README.md)
 - [docs/architecture.md](/Users/ysera/headless-agent/docs/architecture.md)
 - [docs/headless.md](/Users/ysera/headless-agent/docs/headless.md)
-
-If the implementation direction changes materially, also update:
-- [PLAN.md](/Users/ysera/headless-agent/PLAN.md)
-- [IMPLEMENTATION_SPEC.md](/Users/ysera/headless-agent/IMPLEMENTATION_SPEC.md), if the source-of-truth spec should keep matching the shipped direction

@@ -183,6 +183,160 @@ fn read_file_small_file_returns_total_lines_without_truncation() {
     assert!(text.contains("line 100"));
 }
 
+#[test]
+fn edit_file_replaces_single_match() {
+    let temp = TempDir::new().expect("tempdir");
+    let cwd = temp.path();
+    let run_dir = cwd.join("run");
+    fs::create_dir_all(&run_dir).expect("run dir");
+    fs::write(cwd.join("target.txt"), "aaa\nbbb\nccc\n").expect("target file");
+
+    let config = test_config(cwd);
+    let run_control = new_run_control(&config, Duration::from_secs(5));
+    let context = ToolContext::new(
+        cwd,
+        &run_dir,
+        &config,
+        false,
+        &config.shell,
+        &config.shell_args,
+        &run_control,
+    );
+    let execution = execute_tool(
+        &context,
+        &["edit_file".to_string()],
+        "edit_file",
+        &json!({ "path": "target.txt", "old_text": "bbb", "new_text": "zzz" }),
+    )
+    .expect("edit execution");
+    let payload: Value = serde_json::from_str(&execution.content).expect("json");
+    assert_eq!(payload["ok"], true);
+    assert_eq!(payload["replaced"], true);
+    assert_eq!(
+        fs::read_to_string(cwd.join("target.txt")).expect("read back"),
+        "aaa\nzzz\nccc\n"
+    );
+}
+
+#[test]
+fn edit_file_rejects_zero_matches() {
+    let temp = TempDir::new().expect("tempdir");
+    let cwd = temp.path();
+    let run_dir = cwd.join("run");
+    fs::create_dir_all(&run_dir).expect("run dir");
+    fs::write(cwd.join("target.txt"), "aaa\nbbb\n").expect("target file");
+
+    let config = test_config(cwd);
+    let run_control = new_run_control(&config, Duration::from_secs(5));
+    let context = ToolContext::new(
+        cwd,
+        &run_dir,
+        &config,
+        false,
+        &config.shell,
+        &config.shell_args,
+        &run_control,
+    );
+    let error = execute_tool(
+        &context,
+        &["edit_file".to_string()],
+        "edit_file",
+        &json!({ "path": "target.txt", "old_text": "missing", "new_text": "x" }),
+    )
+    .expect_err("should fail");
+    assert!(matches!(error, headless::error::AppError::Tool(_)));
+}
+
+#[test]
+fn edit_file_rejects_multiple_matches() {
+    let temp = TempDir::new().expect("tempdir");
+    let cwd = temp.path();
+    let run_dir = cwd.join("run");
+    fs::create_dir_all(&run_dir).expect("run dir");
+    fs::write(cwd.join("target.txt"), "aaa\naaa\n").expect("target file");
+
+    let config = test_config(cwd);
+    let run_control = new_run_control(&config, Duration::from_secs(5));
+    let context = ToolContext::new(
+        cwd,
+        &run_dir,
+        &config,
+        false,
+        &config.shell,
+        &config.shell_args,
+        &run_control,
+    );
+    let error = execute_tool(
+        &context,
+        &["edit_file".to_string()],
+        "edit_file",
+        &json!({ "path": "target.txt", "old_text": "aaa", "new_text": "x" }),
+    )
+    .expect_err("should fail");
+    assert!(matches!(error, headless::error::AppError::Tool(_)));
+}
+
+#[test]
+fn write_file_creates_nested_path_with_create_parents() {
+    let temp = TempDir::new().expect("tempdir");
+    let cwd = temp.path();
+    let run_dir = cwd.join("run");
+    fs::create_dir_all(&run_dir).expect("run dir");
+
+    let config = test_config(cwd);
+    let run_control = new_run_control(&config, Duration::from_secs(5));
+    let context = ToolContext::new(
+        cwd,
+        &run_dir,
+        &config,
+        false,
+        &config.shell,
+        &config.shell_args,
+        &run_control,
+    );
+    let execution = execute_tool(
+        &context,
+        &["write_file".to_string()],
+        "write_file",
+        &json!({ "path": "a/b/c/deep.txt", "content": "nested", "create_parents": true }),
+    )
+    .expect("write execution");
+    let payload: Value = serde_json::from_str(&execution.content).expect("json");
+    assert_eq!(payload["ok"], true);
+    assert_eq!(
+        fs::read_to_string(cwd.join("a/b/c/deep.txt")).expect("read back"),
+        "nested"
+    );
+}
+
+#[test]
+fn write_file_rejects_missing_parent_without_create_parents() {
+    let temp = TempDir::new().expect("tempdir");
+    let cwd = temp.path();
+    let run_dir = cwd.join("run");
+    fs::create_dir_all(&run_dir).expect("run dir");
+
+    let config = test_config(cwd);
+    let run_control = new_run_control(&config, Duration::from_secs(5));
+    let context = ToolContext::new(
+        cwd,
+        &run_dir,
+        &config,
+        false,
+        &config.shell,
+        &config.shell_args,
+        &run_control,
+    );
+    let error = execute_tool(
+        &context,
+        &["write_file".to_string()],
+        "write_file",
+        &json!({ "path": "nonexistent/dir/file.txt", "content": "hello" }),
+    )
+    .expect_err("should fail");
+    assert!(matches!(error, headless::error::AppError::Tool(_)));
+}
+
 fn test_config(cwd: &std::path::Path) -> GlobalConfig {
     GlobalConfig {
         sessions_dir: cwd.join("sessions"),

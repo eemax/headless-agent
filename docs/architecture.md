@@ -69,8 +69,11 @@ Current on-disk layout:
     meta.json
     messages.jsonl
     lock
+    execution.lock
     runs/
       <run-id>/
+        transcript.jsonl
+        outcome.json
         assistant/
         tool-outputs/
 ```
@@ -83,6 +86,16 @@ Important behavior:
 - later runs may override `--model`, `--effort`, and `--cwd` per invocation without mutating those stored defaults
 - `--plan` is per-invocation only and is not stored in `meta.json`
 - `session stop` marks the session as stopped and blocks later appends
+
+## Session History Projection
+
+Not all records from a run are persisted back to the session's `messages.jsonl`. The projection in [src/app.rs](/Users/ysera/headless-agent/src/app.rs) works as follows:
+
+- the user prompt(s) are always appended
+- if the run completed normally, the final assistant message (the one without tool calls) is appended
+- all intermediate records — tool-calling assistant messages, tool results, and mid-loop state — live only in the per-run `transcript.jsonl` under `runs/<run-id>/`
+
+This means `messages.jsonl` is a compact replay log of user/assistant turns, not a full audit trail. The full audit trail is in the per-run transcript.
 
 ## Optimistic Concurrency
 
@@ -110,7 +123,7 @@ Current prompt assembly order:
 
 1. agent system prompt
 2. role system prompt, if present
-3. full stored message history
+3. replay-oriented session history: only user messages and assistant messages without tool calls are sent back; tool-call-bearing assistant messages and tool result messages are skipped
 4. current user prompt, prefixed by role user text if present
 5. stdin as an extra user message, if present
 

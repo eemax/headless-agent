@@ -115,6 +115,37 @@ fn tool_allowlist_rejects_disabled_tools() {
     assert!(payload["error"].as_str().unwrap().contains("not enabled"));
 }
 
+#[test]
+fn unknown_tool_returns_structured_error() {
+    let temp = TempDir::new().expect("tempdir");
+    let cwd = temp.path();
+    let run_dir = cwd.join("run");
+    fs::create_dir_all(&run_dir).expect("run dir");
+
+    let config = test_config(cwd);
+    let run_control = new_run_control(&config, Duration::from_secs(5));
+    let context = ToolContext::new(
+        cwd,
+        &run_dir,
+        &config,
+        false,
+        &config.shell,
+        &config.shell_args,
+        &run_control,
+    );
+
+    let execution = execute_tool(
+        &context,
+        &["nonexistent".to_string()],
+        "nonexistent",
+        &json!({}),
+    )
+    .expect("structured error response");
+    let payload: Value = serde_json::from_str(&execution.content).expect("json payload");
+    assert_eq!(payload["ok"], false);
+    assert!(payload["error"].as_str().unwrap().contains("unknown"));
+}
+
 fn test_config(cwd: &std::path::Path) -> GlobalConfig {
     GlobalConfig {
         sessions_dir: cwd.join("sessions"),

@@ -115,6 +115,42 @@ fn valid_multi_file_patch_commits_all_requested_changes() {
     );
 }
 
+#[test]
+fn delete_file_operation_removes_target() {
+    let temp = TempDir::new().expect("tempdir");
+    let cwd = temp.path();
+    let run_dir = cwd.join("run");
+    fs::create_dir_all(&run_dir).expect("run dir");
+    fs::write(cwd.join("doomed.txt"), "goodbye\n").expect("doomed file");
+
+    let config = test_config(cwd);
+    let run_control = new_run_control(&config, Duration::from_secs(5));
+    let context = ToolContext::new(
+        cwd,
+        &run_dir,
+        &config,
+        false,
+        &config.shell,
+        &config.shell_args,
+        &run_control,
+    );
+    let patch = "\
+*** Begin Patch
+*** Delete File: doomed.txt
+*** End Patch";
+
+    let execution = execute_tool(
+        &context,
+        &["apply_patch".to_string()],
+        "apply_patch",
+        &json!({ "patch": patch }),
+    )
+    .expect("delete patch");
+    let payload: serde_json::Value = serde_json::from_str(&execution.content).expect("json");
+    assert_eq!(payload["ok"], true);
+    assert!(!cwd.join("doomed.txt").exists());
+}
+
 fn test_config(cwd: &std::path::Path) -> GlobalConfig {
     GlobalConfig {
         sessions_dir: cwd.join("sessions"),

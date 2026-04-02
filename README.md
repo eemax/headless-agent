@@ -2,7 +2,7 @@
 
 `headless` is a session-first, non-interactive CLI agent runner for coding and automation work.
 
-This repo contains the first implementation pass: a Rust binary with durable session storage, repo- or home-root agent and role loading, an OpenRouter-backed assistant/tool loop, artifact-backed tool transcripts, and the phase-6 built-in tools.
+This repo contains the first implementation pass: a Rust binary with durable session storage, repo- or home-root agent and role loading, an OpenRouter-backed assistant/tool loop, artifact-backed tool transcripts, and seven built-in tools.
 
 ## Current Scope
 
@@ -73,11 +73,9 @@ For tests and local harnessing, the implementation also supports `HEADLESS_REPO_
 
 ## Docs
 
-- [Implementation spec](/Users/ysera/headless-agent/IMPLEMENTATION_SPEC.md)
 - [Architecture](/Users/ysera/headless-agent/docs/architecture.md)
 - [Configuration reference](/Users/ysera/headless-agent/docs/headless.md)
 - [Developer playbook](/Users/ysera/headless-agent/docs/dev.md)
-- [Current implementation plan snapshot](/Users/ysera/headless-agent/PLAN.md)
 
 ## Repo Layout
 
