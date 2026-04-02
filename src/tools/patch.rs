@@ -208,7 +208,11 @@ fn build_execution_plan(
                     )));
                 }
                 changed.push(path.display().to_string());
-                writes.push((path, join_lines(&lines)));
+                let mut content = join_lines(&lines);
+                if !content.is_empty() {
+                    content.push('\n');
+                }
+                writes.push((path, content));
             }
             PatchOp::Delete { path } => {
                 let path = resolve_path(context.cwd, &path);

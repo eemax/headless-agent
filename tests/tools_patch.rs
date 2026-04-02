@@ -111,7 +111,7 @@ fn valid_multi_file_patch_commits_all_requested_changes() {
     assert!(!cwd.join("move_me.txt").exists());
     assert_eq!(
         fs::read_to_string(cwd.join("added.txt")).expect("added file"),
-        "new file"
+        "new file\n"
     );
 }
 
