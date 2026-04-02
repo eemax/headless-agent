@@ -1,0 +1,28 @@
+name = "coder"
+description = "General coding agent"
+
+base_url = "https://openrouter.ai/api/v1"
+api_key = ""
+api_key_env = "OPENROUTER_API_KEY"
+
+default_model = "openai/gpt-4.1"
+default_effort = "medium"
+max_output_tokens = 12000
+compaction_at_tokens = 180000
+
+skills_dir = "./skills"
+enabled_skills = []
+
+enabled_tools = [
+  "read_file",
+  "edit_file",
+  "write_file",
+  "glob",
+  "grep",
+  "apply_patch",
+  "bash",
+]
+
+system_prompt_file = "../prompts/coder.md"
+
+timeout = "2h"

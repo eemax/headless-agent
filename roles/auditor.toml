@@ -1,0 +1,4 @@
+name = "auditor"
+description = "Risk-focused review framing"
+system_prompt_file = "../prompts/auditor.md"
+user_prefix_file = "../prompts/auditor-user.md"
