@@ -11,7 +11,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use assert_cmd::Command;
@@ -285,6 +285,21 @@ impl FakeOpenRouter {
 
     pub fn requests(&self) -> Vec<Value> {
         self.requests.lock().expect("requests").clone()
+    }
+
+    pub fn wait_for_requests(&self, expected: usize, timeout: Duration) {
+        let start = Instant::now();
+        loop {
+            let seen = self.requests.lock().expect("requests").len();
+            if seen >= expected {
+                return;
+            }
+            assert!(
+                start.elapsed() < timeout,
+                "timed out waiting for {expected} requests; saw {seen}"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 }
 

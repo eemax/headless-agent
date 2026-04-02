@@ -113,6 +113,8 @@ fn valid_multi_file_patch_commits_all_requested_changes() {
         fs::read_to_string(cwd.join("added.txt")).expect("added file"),
         "new file\n"
     );
+    assert_no_patch_artifacts(cwd);
+    assert_no_patch_artifacts(&cwd.join("moved"));
 }
 
 #[test]
@@ -253,4 +255,18 @@ fn test_config(cwd: &std::path::Path) -> GlobalConfig {
         api_key_env: None,
         source_path: None,
     }
+}
+
+fn assert_no_patch_artifacts(dir: &std::path::Path) {
+    let leftovers = fs::read_dir(dir)
+        .expect("read dir")
+        .map(|entry| entry.expect("dir entry").file_name())
+        .map(|name| name.to_string_lossy().to_string())
+        .filter(|name| name.starts_with(".headless_"))
+        .collect::<Vec<_>>();
+    assert!(
+        leftovers.is_empty(),
+        "unexpected patch artifacts in {}: {leftovers:?}",
+        dir.display()
+    );
 }

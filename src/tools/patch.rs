@@ -81,6 +81,13 @@ struct BackupEntry {
     backup_path: PathBuf,
 }
 
+#[derive(Debug)]
+struct PreparedExecution {
+    created_dirs: Vec<PathBuf>,
+    staged_writes: Vec<StagedWrite>,
+    backups: Vec<BackupEntry>,
+}
+
 fn parse_patch(input: &str) -> Result<Vec<PatchOp>, AppError> {
     let lines: Vec<&str> = input.lines().collect();
     if lines.first().copied() != Some("*** Begin Patch") {
@@ -288,92 +295,106 @@ fn build_execution_plan(
 }
 
 fn commit_execution_plan(context: &ToolContext<'_>, plan: &ExecutionPlan) -> Result<(), AppError> {
+    let prepared = prepare_execution_plan(context, plan)?;
+    commit_prepared_execution(prepared)
+}
+
+fn prepare_execution_plan(
+    context: &ToolContext<'_>,
+    plan: &ExecutionPlan,
+) -> Result<PreparedExecution, AppError> {
     // Phase 1: Stage content into random-named temp files in the destination directories.
     let mut created_dirs = Vec::new();
     let mut created_dir_set = HashSet::new();
     let mut staged_writes = Vec::new();
-    let mut stage_error = None;
-    for (path, content) in &plan.writes {
-        let _ = context.remaining_budget()?;
-        let parent = path.parent().unwrap_or(Path::new("."));
-        if let Err(err) = ensure_parent_dirs(parent, &mut created_dirs, &mut created_dir_set) {
-            stage_error = Some(err);
-            break;
+    let mut backups = Vec::new();
+    let staged = (|| -> Result<(), AppError> {
+        for (path, content) in &plan.writes {
+            let _ = context.remaining_budget()?;
+            let parent = path.parent().unwrap_or(Path::new("."));
+            ensure_parent_dirs(parent, &mut created_dirs, &mut created_dir_set)?;
+            let mut temp = tempfile::Builder::new()
+                .prefix(".headless_")
+                .tempfile_in(parent)
+                .map_err(|err| {
+                    AppError::Tool(format!(
+                        "failed to create temp file in {}: {err}",
+                        parent.display()
+                    ))
+                })?;
+            std::io::Write::write_all(&mut temp, content.as_bytes())?;
+            staged_writes.push(StagedWrite {
+                temp,
+                final_path: path.clone(),
+            });
         }
-        let mut temp = match tempfile::Builder::new()
-            .prefix(".headless_")
-            .tempfile_in(parent)
-        {
-            Ok(temp) => temp,
-            Err(err) => {
-                stage_error = Some(AppError::Tool(format!(
-                    "failed to create temp file in {}: {err}",
-                    parent.display()
-                )));
-                break;
-            }
-        };
-        if let Err(err) = std::io::Write::write_all(&mut temp, content.as_bytes()) {
-            stage_error = Some(err.into());
-            break;
+
+        for path in &plan.backup_targets {
+            let _ = context.remaining_budget()?;
+            backups.push(BackupEntry {
+                original_path: path.clone(),
+                backup_path: unique_backup_path(path)?,
+            });
         }
-        staged_writes.push(StagedWrite {
-            temp,
-            final_path: path.clone(),
-        });
-    }
-    if let Some(error) = stage_error {
+        Ok(())
+    })();
+    if let Err(error) = staged {
         drop(staged_writes);
         cleanup_created_dirs(&created_dirs);
         return Err(error);
     }
 
-    // Phase 2: Move original files out of the way so writes/deletes can be rolled back.
-    let mut backups = Vec::new();
-    for path in &plan.backup_targets {
-        let _ = context.remaining_budget()?;
-        let backup_path = unique_backup_path(path)?;
-        if let Err(err) = fs::rename(path, &backup_path) {
+    Ok(PreparedExecution {
+        created_dirs,
+        staged_writes,
+        backups,
+    })
+}
+
+fn commit_prepared_execution(prepared: PreparedExecution) -> Result<(), AppError> {
+    let PreparedExecution {
+        created_dirs,
+        staged_writes,
+        backups,
+    } = prepared;
+
+    // Once commit starts, do not consult the run budget again. We either finish
+    // atomically or roll back to the original state.
+    let mut moved_backups = Vec::new();
+    for backup in backups {
+        if let Err(err) = fs::rename(&backup.original_path, &backup.backup_path) {
             drop(staged_writes);
-            rollback_transaction(&[], &backups);
+            rollback_transaction(&[], &moved_backups);
             cleanup_created_dirs(&created_dirs);
             return Err(AppError::Tool(format!(
                 "failed to back up patch target {}: {err}",
-                path.display()
+                backup.original_path.display()
             )));
         }
-        backups.push(BackupEntry {
-            original_path: path.clone(),
-            backup_path,
-        });
+        moved_backups.push(backup);
     }
 
-    // Phase 3: Rename staged temp files into place.
+    // Phase 2: Rename staged temp files into place.
     let mut persisted_paths = Vec::new();
-    let mut persist_error = None;
-    for staged in staged_writes {
-        let _ = context.remaining_budget()?;
+    let mut staged_writes = staged_writes.into_iter();
+    while let Some(staged) = staged_writes.next() {
         let final_path = staged.final_path;
         match staged.temp.persist(&final_path) {
             Ok(_) => persisted_paths.push(final_path),
             Err(err) => {
-                persist_error = Some((final_path, err.error));
-                break;
+                drop(staged_writes);
+                rollback_transaction(&persisted_paths, &moved_backups);
+                cleanup_created_dirs(&created_dirs);
+                return Err(AppError::Tool(format!(
+                    "failed to commit patch to {}: {err}",
+                    final_path.display()
+                )));
             }
         }
     }
-    if let Some((final_path, err)) = persist_error {
-        rollback_transaction(&persisted_paths, &backups);
-        cleanup_created_dirs(&created_dirs);
-        return Err(AppError::Tool(format!(
-            "failed to commit patch to {}: {err}",
-            final_path.display()
-        )));
-    }
 
-    // Phase 4: Finalize deletes by dropping their backups.
-    for backup in &backups {
-        let _ = context.remaining_budget()?;
+    // Phase 3: Finalize deletes by dropping their backups.
+    for backup in &moved_backups {
         if let Err(err) = remove_path_if_exists(&backup.backup_path) {
             eprintln!(
                 "warning: failed to remove patch backup {}: {err}",
@@ -504,4 +525,98 @@ fn find_subsequence(haystack: &[String], needle: &[String]) -> Option<usize> {
 
 fn join_lines(lines: &[String]) -> String {
     lines.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        path::Path,
+        sync::{Arc, atomic::AtomicBool},
+        thread,
+        time::Duration,
+    };
+
+    use tempfile::TempDir;
+
+    use super::*;
+    use crate::{config::GlobalConfig, session::SessionStore, tools::RunControl};
+
+    #[test]
+    fn commit_phase_can_finish_after_run_budget_expires() {
+        let temp = TempDir::new().expect("tempdir");
+        let cwd = temp.path();
+        let run_dir = cwd.join("run");
+        fs::create_dir_all(&run_dir).expect("run dir");
+        fs::write(cwd.join("existing.txt"), "before\n").expect("existing file");
+
+        let config = test_config(cwd);
+        let store = SessionStore::new(&config);
+        store.ensure_root().expect("ensure sessions");
+        let session = store.create_session().expect("create session");
+        let run_control = RunControl::new(
+            store,
+            session.session_id,
+            session.revision,
+            Duration::from_millis(50),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let context = ToolContext::new(
+            cwd,
+            &run_dir,
+            &config,
+            false,
+            &config.shell,
+            &config.shell_args,
+            &run_control,
+        );
+        let plan = ExecutionPlan {
+            writes: vec![(cwd.join("existing.txt"), "after\n".to_string())],
+            backup_targets: vec![cwd.join("existing.txt")],
+            changed: Vec::new(),
+        };
+
+        let prepared = prepare_execution_plan(&context, &plan).expect("staged patch");
+        thread::sleep(Duration::from_millis(75));
+        assert!(
+            context.remaining_budget().is_err(),
+            "run budget should be exhausted"
+        );
+
+        commit_prepared_execution(prepared).expect("commit after timeout");
+
+        assert_eq!(
+            fs::read_to_string(cwd.join("existing.txt")).expect("patched file"),
+            "after\n"
+        );
+        assert_no_patch_artifacts(cwd);
+    }
+
+    fn test_config(cwd: &Path) -> GlobalConfig {
+        GlobalConfig {
+            sessions_dir: cwd.join("sessions"),
+            shell: "/bin/bash".to_string(),
+            shell_args: vec!["-lc".to_string()],
+            max_stdin_bytes: 1024,
+            artifact_preview_bytes: 256,
+            catastrophic_output_bytes: 4096,
+            api_key: None,
+            api_key_env: None,
+            source_path: None,
+        }
+    }
+
+    fn assert_no_patch_artifacts(dir: &Path) {
+        let leftovers = fs::read_dir(dir)
+            .expect("read dir")
+            .map(|entry| entry.expect("dir entry").file_name())
+            .map(|name| name.to_string_lossy().to_string())
+            .filter(|name| name.starts_with(".headless_"))
+            .collect::<Vec<_>>();
+        assert!(
+            leftovers.is_empty(),
+            "unexpected patch artifacts in {}: {leftovers:?}",
+            dir.display()
+        );
+    }
 }

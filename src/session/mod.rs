@@ -205,12 +205,9 @@ impl SessionStore {
                 "session `{session_id}` was updated concurrently"
             )));
         }
-        if meta.stopped_at.is_some() {
-            let _ = file.unlock();
-            return Err(AppError::Session(format!(
-                "session `{session_id}` has been stopped and cannot accept new runs"
-            )));
-        }
+        // `session stop` is enforced when the run is admitted in app.rs. Once a
+        // run has started, it may reach its first mutating tool later and still
+        // finish under the execution lock.
 
         Ok(SessionExecutionGuard { file })
     }

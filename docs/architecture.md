@@ -85,7 +85,7 @@ Important behavior:
 - the first successful prompt run binds the session to an `agent_name` and stores sticky defaults for `model`, `effort`, `cwd`, and `initial_role`
 - later runs may override `--model`, `--effort`, and `--cwd` per invocation without mutating those stored defaults
 - `--plan` is per-invocation only and is not stored in `meta.json`
-- `session stop` marks the session as stopped, blocks new runs, and still allows already-started runs to append on completion
+- `session stop` marks the session as stopped, blocks new runs, and still allows already-started runs to finish, even if they reach their first mutating tool later
 
 ## Session History Projection
 
@@ -169,6 +169,7 @@ Tool properties:
 - in `--plan` mode, all tools become non-executing and return planned-action payloads
 - `read_file`, `glob`, and `grep` are retried on ordinary tool errors; mutating tools are single-attempt
 - `bash` is treated as mutating and is killed on timeout, including its subprocess group
+- `apply_patch` keeps parsing and staging cancellable, but once filesystem commit begins it no longer consults the run budget; it either commits fully or rolls back
 
 ## Artifacts
 

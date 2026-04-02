@@ -224,6 +224,101 @@ fn stopped_session_allows_in_flight_mutating_run_to_finish() {
 }
 
 #[test]
+fn stopped_session_allows_pre_stop_run_to_reach_first_mutating_tool() {
+    let server = FakeOpenRouter::start(vec![
+        ResponseSpec::delayed_json(
+            json!({
+                "choices": [{
+                    "message": {
+                        "content": null,
+                        "tool_calls": [{
+                            "id": "call_1",
+                            "function": {
+                                "name": "write_file",
+                                "arguments": "{\"path\":\"note.txt\",\"content\":\"late persist\"}"
+                            }
+                        }]
+                    }
+                }]
+            }),
+            500,
+        ),
+        ResponseSpec::json(json!({
+            "choices": [{
+                "message": {
+                    "content": "done after delayed mutate"
+                }
+            }]
+        })),
+    ]);
+    let workspace = TestWorkspace::new();
+    workspace.write_repo_assets(&server.url());
+
+    let created = workspace
+        .command()
+        .args(["session", "new"])
+        .output()
+        .expect("session new");
+    let session_id = String::from_utf8(created.stdout)
+        .expect("stdout")
+        .trim()
+        .to_string();
+
+    let mut run = workspace.std_command();
+    run.args([
+        "--session",
+        &session_id,
+        "--agent",
+        "coder",
+        "--cwd",
+        workspace.worktree.to_str().expect("cwd"),
+        "finish after delayed stop",
+    ]);
+    let handle = thread::spawn(move || run.output().expect("run output"));
+
+    server.wait_for_requests(1, Duration::from_secs(2));
+
+    workspace
+        .command()
+        .args(["session", "stop", &session_id])
+        .assert()
+        .success();
+
+    let output = handle.join().expect("join run");
+    assert!(output.status.success());
+    assert_eq!(
+        fs::read_to_string(workspace.worktree.join("note.txt")).expect("note"),
+        "late persist"
+    );
+
+    let messages = fs::read_to_string(
+        workspace
+            .sessions_dir
+            .join(&session_id)
+            .join("messages.jsonl"),
+    )
+    .expect("messages");
+    let session_records: Vec<Value> = messages
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("message json"))
+        .collect();
+    assert_eq!(session_records.len(), 2);
+    assert_eq!(session_records[1]["content"], "done after delayed mutate");
+
+    let blocked = workspace
+        .command()
+        .args(["--session", &session_id, "--agent", "coder", "should fail"])
+        .output()
+        .expect("blocked run");
+    assert_eq!(blocked.status.code(), Some(4));
+    assert!(
+        String::from_utf8(blocked.stderr)
+            .expect("stderr")
+            .contains("stopped")
+    );
+}
+
+#[test]
 fn same_session_conflict_allows_only_one_mutating_run_to_change_the_worktree() {
     let server = FakeOpenRouter::start(vec![
         ResponseSpec::delayed_json(
