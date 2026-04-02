@@ -1,4 +1,5 @@
 use crate::{
+    error::AppError,
     session::SessionExecutionGuard,
     types::{ArtifactRef, TranscriptRecord},
 };
@@ -15,11 +16,35 @@ pub struct ToolExecution {
     pub artifact: Option<ArtifactRef>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoopTermination {
+    Complete,
+    StepCapExceeded,
+    Timeout(String),
+    Error(String),
+}
+
+impl LoopTermination {
+    pub fn into_error(self) -> Option<AppError> {
+        match self {
+            Self::Complete => None,
+            Self::StepCapExceeded => Some(AppError::Runtime(
+                "agent loop exceeded the step cap".to_string(),
+            )),
+            Self::Timeout(msg) => Some(AppError::Timeout(msg)),
+            Self::Error(msg) => Some(AppError::Runtime(msg)),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RunResult {
     pub final_text: String,
     pub records: Vec<TranscriptRecord>,
     pub artifacts: RunArtifacts,
+    pub termination: LoopTermination,
+    pub total_prompt_tokens: usize,
+    pub total_completion_tokens: usize,
 }
 
 #[derive(Debug)]

@@ -1,11 +1,12 @@
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use std::{fs, path::PathBuf};
 
 use serde::Deserialize;
 
-use crate::{config::HeadlessRoots, error::AppError, types::Effort};
+use crate::{
+    config::{HeadlessRoots, resolve_relative},
+    error::AppError,
+    types::Effort,
+};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AgentDef {
@@ -90,16 +91,6 @@ impl LoadedAgent {
         };
         parse_duration(value)
     }
-}
-
-fn resolve_relative(base_file: &Path, value: &str) -> Result<PathBuf, AppError> {
-    let base_dir = base_file.parent().ok_or_else(|| {
-        AppError::Config(format!(
-            "path {} has no parent directory",
-            base_file.display()
-        ))
-    })?;
-    Ok(base_dir.join(value))
 }
 
 fn parse_duration(input: &str) -> Result<u64, AppError> {

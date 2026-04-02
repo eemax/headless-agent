@@ -197,6 +197,16 @@ fn has_headless_layout(root: &Path) -> bool {
     root.join("agents").exists() || root.join("roles").exists() || root.join("config.toml").exists()
 }
 
+pub fn resolve_relative(base_file: &Path, value: &str) -> Result<PathBuf, AppError> {
+    let base_dir = base_file.parent().ok_or_else(|| {
+        AppError::Config(format!(
+            "path {} has no parent directory",
+            base_file.display()
+        ))
+    })?;
+    Ok(base_dir.join(value))
+}
+
 pub fn expand_tilde(input: &str) -> Result<PathBuf, AppError> {
     if let Some(stripped) = input.strip_prefix("~/") {
         let home = home::home_dir()

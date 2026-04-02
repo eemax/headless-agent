@@ -23,7 +23,7 @@ fn openrouter_request_includes_reasoning_and_tool_definitions() {
             }
         ]
     }))]);
-    let client = OpenRouterClient::new(server.url(), "test-key".to_string());
+    let client = OpenRouterClient::new(server.url(), "test-key".to_string(), Duration::from_secs(5));
     let response = client
         .send_chat(ChatRequest {
             session_id: "session-1",
@@ -47,7 +47,6 @@ fn openrouter_request_includes_reasoning_and_tool_definitions() {
             ],
             tools: &[bash_spec()],
             max_output_tokens: 1234,
-            timeout: Duration::from_secs(5),
         })
         .expect("provider response");
 
@@ -73,7 +72,7 @@ fn openrouter_maps_timeout_status_to_timeout_errors() {
         }),
         delay_ms: 0,
     }]);
-    let client = OpenRouterClient::new(server.url(), "test-key".to_string());
+    let client = OpenRouterClient::new(server.url(), "test-key".to_string(), Duration::from_secs(5));
     let error = client
         .send_chat(ChatRequest {
             session_id: "session-1",
@@ -88,7 +87,6 @@ fn openrouter_maps_timeout_status_to_timeout_errors() {
             }],
             tools: &[],
             max_output_tokens: 128,
-            timeout: Duration::from_secs(5),
         })
         .expect_err("expected timeout error");
 
@@ -105,7 +103,11 @@ fn openrouter_live_smoke_test() {
         Ok(value) if !value.is_empty() => value,
         _ => return,
     };
-    let client = OpenRouterClient::new("https://openrouter.ai/api/v1".to_string(), api_key);
+    let client = OpenRouterClient::new(
+        "https://openrouter.ai/api/v1".to_string(),
+        api_key,
+        Duration::from_secs(30),
+    );
     let response = client
         .send_chat(ChatRequest {
             session_id: "live-smoke",
@@ -120,7 +122,6 @@ fn openrouter_live_smoke_test() {
             }],
             tools: &[],
             max_output_tokens: 32,
-            timeout: Duration::from_secs(30),
         })
         .expect("live response");
     assert!(

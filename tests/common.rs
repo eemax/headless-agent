@@ -14,6 +14,7 @@ use std::{
     time::Duration,
 };
 
+
 use assert_cmd::Command;
 use headless::{config::GlobalConfig, session::SessionStore, tools::RunControl};
 use serde_json::Value;
@@ -165,7 +166,13 @@ pub fn new_run_control(config: &GlobalConfig, timeout: Duration) -> RunControl {
     let store = SessionStore::new(config);
     store.ensure_root().expect("ensure sessions");
     let session = store.create_session().expect("create session");
-    RunControl::new(store, session.session_id, session.revision, timeout)
+    RunControl::new(
+        store,
+        session.session_id,
+        session.revision,
+        timeout,
+        Arc::new(AtomicBool::new(false)),
+    )
 }
 
 pub fn extract_created_session_id(stderr: &str) -> String {

@@ -41,13 +41,29 @@ pub fn assemble_prompt(
     }
 
     for record in history {
-        messages.push(PromptMessage {
-            role: record.role,
-            content: record.content_for_prompt(),
-            name: record.name.clone(),
-            tool_call_id: record.tool_call_id.clone(),
-            tool_calls: record.tool_calls.clone().unwrap_or_default(),
-        });
+        match record.role {
+            MessageRole::User => {
+                messages.push(PromptMessage {
+                    role: record.role,
+                    content: record.content_for_prompt(),
+                    name: None,
+                    tool_call_id: None,
+                    tool_calls: Vec::new(),
+                });
+            }
+            MessageRole::Assistant
+                if record.tool_calls.as_ref().is_none_or(|tc| tc.is_empty()) =>
+            {
+                messages.push(PromptMessage {
+                    role: record.role,
+                    content: record.content_for_prompt(),
+                    name: None,
+                    tool_call_id: None,
+                    tool_calls: Vec::new(),
+                });
+            }
+            _ => {}
+        }
     }
 
     let mut current_prompt = String::new();
@@ -79,14 +95,16 @@ pub fn assemble_prompt(
         });
     }
 
-    let estimated_tokens = estimate_tokens(&messages);
+    let estimated_tokens = estimate_tokens_rough(&messages);
     Ok(PromptAssembly {
         messages,
         estimated_tokens,
     })
 }
 
-fn estimate_tokens(messages: &[PromptMessage]) -> usize {
+/// Pre-flight rough estimate based on character count (chars / 4).
+/// The authoritative token count comes from the OpenRouter API response.
+fn estimate_tokens_rough(messages: &[PromptMessage]) -> usize {
     let chars: usize = messages
         .iter()
         .filter_map(|message| message.content.as_ref())

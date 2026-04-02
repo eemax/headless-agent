@@ -2,6 +2,8 @@ use std::{
     env,
     io::{self, IsTerminal, Read, Write},
     path::PathBuf,
+    sync::Arc,
+    sync::atomic::AtomicBool,
 };
 
 use crate::{
@@ -25,9 +27,9 @@ struct BoundRunValues<'a> {
     role_name: Option<&'a str>,
 }
 
-pub fn run_from_env() -> Result<(), AppError> {
+pub fn run_from_env(interrupted: Arc<AtomicBool>) -> Result<(), AppError> {
     let command = cli::parse_from_env()?;
-    let output = run(command)?;
+    let output = run(command, interrupted)?;
     let mut stderr = io::stderr().lock();
     for line in output.stderr {
         stderr.write_all(line.as_bytes())?;
@@ -45,7 +47,7 @@ pub struct AppOutput {
     pub stderr: Vec<String>,
 }
 
-pub fn run(command: Command) -> Result<AppOutput, AppError> {
+pub fn run(command: Command, interrupted: Arc<AtomicBool>) -> Result<AppOutput, AppError> {
     let roots = HeadlessRoots::discover();
     let config = GlobalConfig::load(&roots)?;
     let store = SessionStore::new(&config);
@@ -93,7 +95,7 @@ pub fn run(command: Command) -> Result<AppOutput, AppError> {
             store.stop_session(&id)?;
             Ok(AppOutput::default())
         }
-        Command::Run(args) => run_prompt(args, roots, config, store),
+        Command::Run(args) => run_prompt(args, roots, config, store, interrupted),
     }
 }
 
@@ -102,6 +104,7 @@ fn run_prompt(
     roots: HeadlessRoots,
     config: GlobalConfig,
     store: SessionStore,
+    interrupted: Arc<AtomicBool>,
 ) -> Result<AppOutput, AppError> {
     let mut stderr = Vec::new();
     let current_dir = env::current_dir()
@@ -160,7 +163,7 @@ fn run_prompt(
         .effort
         .or(session_meta.effort)
         .unwrap_or(agent.def.default_effort);
-    let plan_mode = args.plan.unwrap_or(false);
+    let plan_mode = args.plan;
     let effective_cwd = args
         .cwd
         .clone()
@@ -201,12 +204,14 @@ fn run_prompt(
         config: config.clone(),
         session_store: store.clone(),
         api_key: resolve_api_key(&agent, &config)?,
+        interrupted,
     };
     let RunOutcome {
         result,
         execution_guard,
     } = run_agent_loop(run_context)?;
     let final_text = result.final_text.clone();
+    let termination = result.termination.clone();
     let bound_values = BoundRunValues {
         agent_name: &agent_name,
         model: &model,
@@ -216,6 +221,10 @@ fn run_prompt(
     };
     let commit = build_commit(&session_meta, result, user_records, &bound_values);
     store.append_run(&session_id, commit, execution_guard.as_ref())?;
+
+    if let Some(err) = termination.into_error() {
+        return Err(err);
+    }
 
     if args.verbose || args.debug {
         stderr.push(format!(
@@ -343,7 +352,9 @@ fn read_stdin_if_present(limit: usize) -> Result<Option<String>, AppError> {
         return Ok(None);
     }
     let mut buffer = Vec::new();
-    io::stdin().read_to_end(&mut buffer)?;
+    io::stdin()
+        .take(limit as u64 + 1)
+        .read_to_end(&mut buffer)?;
     if buffer.is_empty() {
         return Ok(None);
     }

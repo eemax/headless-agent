@@ -269,13 +269,33 @@ fn build_execution_plan(
 }
 
 fn commit_execution_plan(context: &ToolContext<'_>, plan: &ExecutionPlan) -> Result<(), AppError> {
+    // Phase 1: Write all content to temporary files (same directory for atomic rename)
+    let mut temp_files: Vec<(PathBuf, PathBuf)> = Vec::new();
     for (path, content) in &plan.writes {
         let _ = context.remaining_budget()?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(path, content)?;
+        let temp_path = temp_path_for(path);
+        if let Err(err) = fs::write(&temp_path, content) {
+            cleanup_temps(&temp_files);
+            return Err(err.into());
+        }
+        temp_files.push((temp_path, path.clone()));
     }
+
+    // Phase 2: Rename all temp files to final paths (atomic per file on same fs)
+    for (temp_path, final_path) in &temp_files {
+        if let Err(err) = fs::rename(temp_path, final_path) {
+            cleanup_temps(&temp_files);
+            return Err(AppError::Tool(format!(
+                "failed to commit patch to {}: {err}",
+                final_path.display()
+            )));
+        }
+    }
+
+    // Phase 3: Process deletes
     for path in &plan.deletes {
         let _ = context.remaining_budget()?;
         if path.exists() {
@@ -283,6 +303,22 @@ fn commit_execution_plan(context: &ToolContext<'_>, plan: &ExecutionPlan) -> Res
         }
     }
     Ok(())
+}
+
+fn temp_path_for(path: &Path) -> PathBuf {
+    let mut name = path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    name.push_str(".headless_tmp");
+    path.with_file_name(name)
+}
+
+fn cleanup_temps(temp_files: &[(PathBuf, PathBuf)]) {
+    for (temp, _) in temp_files {
+        let _ = fs::remove_file(temp);
+    }
 }
 
 fn reserve_path(paths: &mut HashSet<PathBuf>, path: &Path) -> Result<(), AppError> {

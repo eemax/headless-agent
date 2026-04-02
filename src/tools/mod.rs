@@ -7,7 +7,10 @@ pub mod patch;
 use std::{
     cell::RefCell,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -60,6 +63,7 @@ pub struct RunControl {
     timeout: Duration,
     deadline: Instant,
     execution_guard: RefCell<Option<SessionExecutionGuard>>,
+    interrupted: Arc<AtomicBool>,
 }
 
 pub struct ToolContext<'a> {
@@ -79,6 +83,7 @@ impl RunControl {
         session_id: String,
         session_revision: u64,
         timeout: Duration,
+        interrupted: Arc<AtomicBool>,
     ) -> Self {
         Self {
             session_store,
@@ -87,10 +92,14 @@ impl RunControl {
             timeout,
             deadline: Instant::now() + timeout,
             execution_guard: RefCell::new(None),
+            interrupted,
         }
     }
 
     pub fn remaining_budget(&self) -> Result<Duration, AppError> {
+        if self.interrupted.load(Ordering::Relaxed) {
+            return Err(AppError::Runtime("interrupted by signal".to_string()));
+        }
         let now = Instant::now();
         if now >= self.deadline {
             return Err(AppError::Timeout(format!(
@@ -256,6 +265,17 @@ pub fn tool_behavior(name: &str) -> Option<ToolBehavior> {
         _ => None,
     }
 }
+
+pub const IGNORED_DIRS: &[&str] = &[
+    ".git",
+    "node_modules",
+    "target",
+    ".hg",
+    ".svn",
+    "__pycache__",
+    "dist",
+    "build",
+];
 
 pub fn resolve_path(cwd: &Path, value: &str) -> PathBuf {
     let path = PathBuf::from(value);

@@ -9,16 +9,28 @@ use crate::{
     types::{Effort, MessageRole, PromptMessage, ToolCallRecord},
 };
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct OpenRouterClient {
     base_url: String,
     api_key: String,
+    agent: ureq::Agent,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct TokenUsage {
+    #[serde(default)]
+    pub prompt_tokens: usize,
+    #[serde(default)]
+    pub completion_tokens: usize,
+    #[serde(default)]
+    pub total_tokens: usize,
 }
 
 #[derive(Debug, Clone)]
 pub struct ProviderResponse {
     pub content: Option<String>,
     pub tool_calls: Vec<ToolCallRecord>,
+    pub usage: Option<TokenUsage>,
 }
 
 pub struct ChatRequest<'a> {
@@ -28,12 +40,20 @@ pub struct ChatRequest<'a> {
     pub messages: &'a [PromptMessage],
     pub tools: &'a [ToolSpec],
     pub max_output_tokens: usize,
-    pub timeout: Duration,
 }
 
 impl OpenRouterClient {
-    pub fn new(base_url: String, api_key: String) -> Self {
-        Self { base_url, api_key }
+    pub fn new(base_url: String, api_key: String, timeout: Duration) -> Self {
+        let agent = ureq::AgentBuilder::new()
+            .timeout_connect(Duration::from_secs(30))
+            .timeout_read(timeout)
+            .timeout_write(Duration::from_secs(30))
+            .build();
+        Self {
+            base_url,
+            api_key,
+            agent,
+        }
     }
 
     pub fn send_chat(&self, request: ChatRequest<'_>) -> Result<ProviderResponse, AppError> {
@@ -46,13 +66,9 @@ impl OpenRouterClient {
             request.tools,
             request.max_output_tokens,
         );
-        let agent = ureq::AgentBuilder::new()
-            .timeout_connect(request.timeout)
-            .timeout_read(request.timeout)
-            .timeout_write(request.timeout)
-            .build();
 
-        let response = agent
+        let response = self
+            .agent
             .post(&url)
             .set("Authorization", &format!("Bearer {}", self.api_key))
             .set("Content-Type", "application/json")
@@ -73,8 +89,7 @@ impl OpenRouterClient {
             Err(ureq::Error::Transport(error)) => {
                 if error.to_string().to_lowercase().contains("timed out") {
                     return Err(AppError::Timeout(format!(
-                        "OpenRouter request timed out after {:?}",
-                        request.timeout
+                        "OpenRouter request timed out: {error}"
                     )));
                 }
                 return Err(AppError::Provider(format!(
@@ -107,6 +122,7 @@ impl OpenRouterClient {
         Ok(ProviderResponse {
             content,
             tool_calls,
+            usage: parsed.usage,
         })
     }
 }
@@ -231,6 +247,7 @@ fn extract_error_message(body: &str) -> Option<String> {
 #[derive(Debug, Deserialize)]
 struct ChatResponse {
     choices: Vec<Choice>,
+    usage: Option<TokenUsage>,
 }
 
 #[derive(Debug, Deserialize)]

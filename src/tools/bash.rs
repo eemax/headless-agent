@@ -18,7 +18,7 @@ use crate::{
 pub fn bash_spec() -> crate::tools::ToolSpec {
     crate::tools::ToolSpec {
         name: "bash",
-        description: "Run a shell command in the effective working directory.",
+        description: "Run a shell command. stdout and stderr are each capped at the configured output limit. Use head/tail/grep in the command to manage large output.",
         parameters: json!({
             "type": "object",
             "properties": {
@@ -52,8 +52,9 @@ pub fn run_bash(context: &ToolContext<'_>, arguments: &Value) -> Result<Value, A
         .stderr
         .take()
         .ok_or_else(|| AppError::Shell("failed to capture shell stderr".to_string()))?;
-    let stdout_handle = spawn_reader(stdout_reader);
-    let stderr_handle = spawn_reader(stderr_reader);
+    let output_limit = context.config.catastrophic_output_bytes;
+    let stdout_handle = spawn_reader(stdout_reader, output_limit);
+    let stderr_handle = spawn_reader(stderr_reader, output_limit);
     let deadline = Instant::now() + timeout;
 
     let status = loop {
@@ -76,33 +77,55 @@ pub fn run_bash(context: &ToolContext<'_>, arguments: &Value) -> Result<Value, A
         thread::sleep(Duration::from_millis(10));
     };
 
-    let stdout = String::from_utf8_lossy(&collect_reader(stdout_handle)?).to_string();
-    let stderr = String::from_utf8_lossy(&collect_reader(stderr_handle)?).to_string();
+    let (stdout_bytes, stdout_truncated) = collect_reader(stdout_handle)?;
+    let (stderr_bytes, stderr_truncated) = collect_reader(stderr_handle)?;
+    let stdout = String::from_utf8_lossy(&stdout_bytes).to_string();
+    let stderr = String::from_utf8_lossy(&stderr_bytes).to_string();
 
-    Ok(json!({
+    let mut result = json!({
         "ok": status.success(),
         "command": command,
         "cwd": context.cwd.display().to_string(),
         "exit_code": status.code(),
         "stdout": stdout,
         "stderr": stderr,
-    }))
+        "stdout_truncated": stdout_truncated,
+        "stderr_truncated": stderr_truncated,
+    });
+    if stdout_truncated || stderr_truncated {
+        let which = match (stdout_truncated, stderr_truncated) {
+            (true, true) => "stdout and stderr were both",
+            (true, false) => "stdout was",
+            (false, true) => "stderr was",
+            _ => unreachable!(),
+        };
+        result["note"] = json!(format!(
+            "{which} truncated at {output_limit} bytes. The command may have produced more output. Pipe through head/tail/grep to get specific sections."
+        ));
+    }
+    Ok(result)
 }
 
-fn spawn_reader<R>(mut reader: R) -> thread::JoinHandle<io::Result<Vec<u8>>>
+fn spawn_reader<R>(reader: R, limit: usize) -> thread::JoinHandle<io::Result<(Vec<u8>, bool)>>
 where
     R: Read + Send + 'static,
 {
     thread::spawn(move || {
         let mut buffer = Vec::new();
-        reader.read_to_end(&mut buffer)?;
-        Ok(buffer)
+        reader.take(limit as u64 + 1).read_to_end(&mut buffer)?;
+        let truncated = buffer.len() > limit;
+        if truncated {
+            buffer.truncate(limit);
+        }
+        Ok((buffer, truncated))
     })
 }
 
-fn collect_reader(handle: thread::JoinHandle<io::Result<Vec<u8>>>) -> Result<Vec<u8>, AppError> {
+fn collect_reader(
+    handle: thread::JoinHandle<io::Result<(Vec<u8>, bool)>>,
+) -> Result<(Vec<u8>, bool), AppError> {
     match handle.join() {
-        Ok(Ok(buffer)) => Ok(buffer),
+        Ok(Ok(result)) => Ok(result),
         Ok(Err(error)) => Err(AppError::Shell(format!(
             "failed to capture shell output: {error}"
         ))),

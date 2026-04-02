@@ -7,10 +7,12 @@ use crate::{
     tools::{ToolContext, optional_bool, optional_u64, require_string, resolve_path},
 };
 
+const DEFAULT_MAX_LINES: usize = 2000;
+
 pub fn read_file_spec() -> crate::tools::ToolSpec {
     crate::tools::ToolSpec {
         name: "read_file",
-        description: "Read a UTF-8 text file from disk.",
+        description: "Read a UTF-8 text file. Returns up to 2000 lines by default. Use start_line and end_line for specific ranges.",
         parameters: json!({
             "type": "object",
             "properties": {
@@ -55,46 +57,63 @@ pub fn write_file_spec() -> crate::tools::ToolSpec {
     }
 }
 
-pub fn read_file(_context: &ToolContext<'_>, arguments: &Value) -> Result<Value, AppError> {
-    let _ = _context.remaining_budget()?;
+pub fn read_file(context: &ToolContext<'_>, arguments: &Value) -> Result<Value, AppError> {
+    let _ = context.remaining_budget()?;
     let path = require_string(arguments, "path")?;
-    let path = resolve_path(_context.cwd, &path);
+    let path = resolve_path(context.cwd, &path);
     let content = fs::read_to_string(&path)
         .map_err(|err| AppError::Tool(format!("failed to read file {}: {err}", path.display())))?;
 
+    let lines: Vec<&str> = content.lines().collect();
+    let total_lines = lines.len();
+    let explicit_range =
+        optional_u64(arguments, "start_line").is_some() || optional_u64(arguments, "end_line").is_some();
     let start_line = optional_u64(arguments, "start_line").unwrap_or(1) as usize;
     let end_line = optional_u64(arguments, "end_line").map(|value| value as usize);
-    let lines: Vec<&str> = content.lines().collect();
-    let selected = if let Some(end_line) = end_line {
-        lines
+
+    let (selected, effective_end, truncated) = if let Some(end_line) = end_line {
+        let sel: Vec<&str> = lines
             .iter()
             .enumerate()
-            .filter(|(index, _)| {
-                let line_no = index + 1;
-                line_no >= start_line && line_no <= end_line
+            .filter(|(i, _)| {
+                let n = i + 1;
+                n >= start_line && n <= end_line
             })
-            .map(|(_, line)| *line)
-            .collect::<Vec<_>>()
-            .join("\n")
-    } else if start_line > 1 {
-        lines
+            .map(|(_, l)| *l)
+            .collect();
+        let eff_end = end_line.min(total_lines);
+        (sel.join("\n"), eff_end, false)
+    } else if explicit_range {
+        let sel: Vec<&str> = lines
             .iter()
             .enumerate()
-            .filter(|(index, _)| index + 1 >= start_line)
-            .map(|(_, line)| *line)
-            .collect::<Vec<_>>()
-            .join("\n")
+            .filter(|(i, _)| i + 1 >= start_line)
+            .map(|(_, l)| *l)
+            .collect();
+        (sel.join("\n"), total_lines, false)
     } else {
-        content
+        let cap = DEFAULT_MAX_LINES;
+        let trunc = total_lines > cap;
+        let take = if trunc { cap } else { total_lines };
+        let sel: Vec<&str> = lines[..take].to_vec();
+        (sel.join("\n"), take, trunc)
     };
 
-    Ok(json!({
+    let mut result = json!({
         "ok": true,
         "path": path.display().to_string(),
         "content": selected,
         "start_line": start_line,
-        "end_line": end_line,
-    }))
+        "end_line": effective_end,
+        "total_lines": total_lines,
+    });
+    if truncated {
+        result["truncated"] = json!(true);
+        result["note"] = json!(format!(
+            "File has {total_lines} lines, showing first {DEFAULT_MAX_LINES}. Use start_line/end_line to read specific ranges."
+        ));
+    }
+    Ok(result)
 }
 
 pub fn edit_file(context: &ToolContext<'_>, arguments: &Value) -> Result<Value, AppError> {

@@ -33,7 +33,7 @@ pub struct RunArgs {
     pub role: Option<String>,
     pub model: Option<String>,
     pub effort: Option<Effort>,
-    pub plan: Option<bool>,
+    pub plan: bool,
     pub cwd: Option<PathBuf>,
     pub verbose: bool,
     pub debug: bool,
@@ -117,7 +117,7 @@ fn parse_run_args(args: Vec<OsString>) -> Result<Command, AppError> {
     let mut role = None;
     let mut model = None;
     let mut effort = None;
-    let mut plan = None;
+    let mut plan = false;
     let mut cwd = None;
     let mut verbose = false;
     let mut debug = false;
@@ -146,7 +146,7 @@ fn parse_run_args(args: Vec<OsString>) -> Result<Command, AppError> {
                 effort = Some(parser.value()?.to_string_lossy().parse()?);
             }
             lexopt::Arg::Long("plan") => {
-                plan = Some(true);
+                plan = true;
             }
             lexopt::Arg::Long("cwd") => {
                 cwd = Some(PathBuf::from(parser.value()?));

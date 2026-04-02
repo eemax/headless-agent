@@ -1,4 +1,8 @@
-use std::time::Duration;
+use std::{
+    sync::Arc,
+    sync::atomic::AtomicBool,
+    time::Duration,
+};
 
 use serde_json::json;
 
@@ -11,8 +15,8 @@ use crate::{
     session::SessionStore,
     tools::{RunControl, ToolContext, builtin_specs, execute_tool, tool_behavior},
     types::{
-        MessageRole, PromptMessage, RunArtifacts, RunOutcome, RunResult, ToolCallRecord,
-        ToolExecution, TranscriptRecord,
+        LoopTermination, MessageRole, PromptMessage, RunArtifacts, RunOutcome, RunResult,
+        ToolCallRecord, ToolExecution, TranscriptRecord,
     },
 };
 
@@ -31,6 +35,7 @@ pub struct AgentRunContext {
     pub config: GlobalConfig,
     pub session_store: SessionStore,
     pub api_key: String,
+    pub interrupted: Arc<AtomicBool>,
 }
 
 const STEP_CAP: usize = 24;
@@ -45,13 +50,14 @@ pub fn run_agent_loop(context: AgentRunContext) -> Result<RunOutcome, AppError> 
         .unwrap_or_else(|| "https://openrouter.ai/api/v1".to_string());
     let timeout = Duration::from_secs(context.agent.timeout_seconds()?);
     let max_output_tokens = context.agent.def.max_output_tokens.unwrap_or(12_000);
-    let client = OpenRouterClient::new(base_url, context.api_key.clone());
+    let client = OpenRouterClient::new(base_url, context.api_key.clone(), timeout);
     let tool_specs = builtin_specs(&context.agent.def.enabled_tools);
     let run_control = RunControl::new(
         context.session_store.clone(),
         context.session_id.clone(),
         context.session_revision,
         timeout,
+        context.interrupted.clone(),
     );
     let tool_context = ToolContext::new(
         &context.cwd,
@@ -65,21 +71,68 @@ pub fn run_agent_loop(context: AgentRunContext) -> Result<RunOutcome, AppError> 
     let mut prompt_messages = context.prompt_messages.clone();
     let mut records = Vec::new();
     let mut artifacts = RunArtifacts::default();
+    let mut total_prompt_tokens: usize = 0;
+    let mut total_completion_tokens: usize = 0;
 
-    for step in 0..STEP_CAP {
-        let remaining_budget = run_control.remaining_budget()?;
-        let response = client.send_chat(ChatRequest {
+    for _step in 0..STEP_CAP {
+        if let Err(err) = run_control.remaining_budget() {
+            return Ok(partial_outcome(
+                records,
+                artifacts,
+                LoopTermination::Timeout(err.to_string()),
+                run_control,
+                total_prompt_tokens,
+                total_completion_tokens,
+            ));
+        }
+        let response = match client.send_chat(ChatRequest {
             session_id: &context.session_id,
             model: &context.model,
             effort: context.effort,
             messages: &prompt_messages,
             tools: &tool_specs,
             max_output_tokens,
-            timeout: remaining_budget,
-        })?;
+        }) {
+            Ok(response) => response,
+            Err(AppError::Timeout(msg)) => {
+                return Ok(partial_outcome(
+                    records,
+                    artifacts,
+                    LoopTermination::Timeout(msg),
+                    run_control,
+                    total_prompt_tokens,
+                    total_completion_tokens,
+                ));
+            }
+            Err(err) if !records.is_empty() => {
+                return Ok(partial_outcome(
+                    records,
+                    artifacts,
+                    LoopTermination::Error(err.to_string()),
+                    run_control,
+                    total_prompt_tokens,
+                    total_completion_tokens,
+                ));
+            }
+            Err(err) => return Err(err),
+        };
+        if let Some(usage) = &response.usage {
+            total_prompt_tokens += usage.prompt_tokens;
+            total_completion_tokens += usage.completion_tokens;
+        }
+        if let Err(err) = run_control.remaining_budget() {
+            return Ok(partial_outcome(
+                records,
+                artifacts,
+                LoopTermination::Timeout(err.to_string()),
+                run_control,
+                total_prompt_tokens,
+                total_completion_tokens,
+            ));
+        }
 
         let (assistant_content, assistant_artifact) =
-            assistant_content_to_record(&context, step, response.content.as_deref())?;
+            assistant_content_to_record(&context, _step, response.content.as_deref())?;
         if let Some(ref artifact) = assistant_artifact {
             artifacts.paths.push(artifact.clone());
         }
@@ -111,14 +164,42 @@ pub fn run_agent_loop(context: AgentRunContext) -> Result<RunOutcome, AppError> 
                     final_text: response.content.unwrap_or_default(),
                     records,
                     artifacts,
+                    termination: LoopTermination::Complete,
+                    total_prompt_tokens,
+                    total_completion_tokens,
                 },
                 execution_guard: run_control.into_execution_guard(),
             });
         }
 
         for tool_call in response.tool_calls {
-            let execution =
-                execute_with_retry(&tool_context, &context.agent.def.enabled_tools, &tool_call)?;
+            let execution = match execute_with_retry(
+                &tool_context,
+                &context.agent.def.enabled_tools,
+                &tool_call,
+            ) {
+                Ok(exec) => exec,
+                Err(AppError::Timeout(msg)) => {
+                    return Ok(partial_outcome(
+                        records,
+                        artifacts,
+                        LoopTermination::Timeout(msg),
+                        run_control,
+                        total_prompt_tokens,
+                        total_completion_tokens,
+                    ));
+                }
+                Err(err) => {
+                    return Ok(partial_outcome(
+                        records,
+                        artifacts,
+                        LoopTermination::Error(err.to_string()),
+                        run_control,
+                        total_prompt_tokens,
+                        total_completion_tokens,
+                    ));
+                }
+            };
             if let Some(artifact) = &execution.artifact {
                 artifacts.paths.push(artifact.clone());
             }
@@ -145,9 +226,46 @@ pub fn run_agent_loop(context: AgentRunContext) -> Result<RunOutcome, AppError> 
         }
     }
 
-    Err(AppError::Runtime(
-        "agent loop exceeded the step cap of 24 iterations".to_string(),
+    Ok(partial_outcome(
+        records,
+        artifacts,
+        LoopTermination::StepCapExceeded,
+        run_control,
+        total_prompt_tokens,
+        total_completion_tokens,
     ))
+}
+
+fn partial_outcome(
+    records: Vec<TranscriptRecord>,
+    artifacts: RunArtifacts,
+    termination: LoopTermination,
+    run_control: RunControl,
+    prompt_tokens: usize,
+    completion_tokens: usize,
+) -> RunOutcome {
+    let final_text = records
+        .iter()
+        .rev()
+        .find_map(|r| {
+            if r.role == MessageRole::Assistant {
+                r.content.clone()
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default();
+    RunOutcome {
+        result: RunResult {
+            final_text,
+            records,
+            artifacts,
+            termination,
+            total_prompt_tokens: prompt_tokens,
+            total_completion_tokens: completion_tokens,
+        },
+        execution_guard: run_control.into_execution_guard(),
+    }
 }
 
 fn execute_with_retry(

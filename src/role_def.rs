@@ -1,11 +1,11 @@
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use std::{fs, path::PathBuf};
 
 use serde::Deserialize;
 
-use crate::{config::HeadlessRoots, error::AppError};
+use crate::{
+    config::{HeadlessRoots, resolve_relative},
+    error::AppError,
+};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct RoleDef {
@@ -72,12 +72,3 @@ impl LoadedRole {
     }
 }
 
-fn resolve_relative(base_file: &Path, value: &str) -> Result<PathBuf, AppError> {
-    let base_dir = base_file.parent().ok_or_else(|| {
-        AppError::Config(format!(
-            "path {} has no parent directory",
-            base_file.display()
-        ))
-    })?;
-    Ok(base_dir.join(value))
-}
