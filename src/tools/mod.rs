@@ -5,14 +5,20 @@ pub mod grep;
 pub mod patch;
 
 use std::{
+    cell::RefCell,
     path::{Path, PathBuf},
     sync::atomic::{AtomicUsize, Ordering},
+    time::{Duration, Instant},
 };
 
 use serde_json::{Value, json};
 
 use crate::{
-    artifact::store_text_artifact, config::GlobalConfig, error::AppError, types::ToolExecution,
+    artifact::store_text_artifact,
+    config::GlobalConfig,
+    error::AppError,
+    session::{SessionExecutionGuard, SessionStore},
+    types::ToolExecution,
 };
 
 #[derive(Debug, Clone)]
@@ -35,6 +41,27 @@ impl ToolSpec {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolAccess {
+    ReadOnly,
+    Mutating,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ToolBehavior {
+    pub access: ToolAccess,
+    pub retryable: bool,
+}
+
+pub struct RunControl {
+    session_store: SessionStore,
+    session_id: String,
+    session_revision: u64,
+    timeout: Duration,
+    deadline: Instant,
+    execution_guard: RefCell<Option<SessionExecutionGuard>>,
+}
+
 pub struct ToolContext<'a> {
     pub cwd: &'a Path,
     pub run_dir: &'a Path,
@@ -42,7 +69,53 @@ pub struct ToolContext<'a> {
     pub plan_mode: bool,
     pub shell: &'a str,
     pub shell_args: &'a [String],
+    pub run_control: &'a RunControl,
     sequence: AtomicUsize,
+}
+
+impl RunControl {
+    pub fn new(
+        session_store: SessionStore,
+        session_id: String,
+        session_revision: u64,
+        timeout: Duration,
+    ) -> Self {
+        Self {
+            session_store,
+            session_id,
+            session_revision,
+            timeout,
+            deadline: Instant::now() + timeout,
+            execution_guard: RefCell::new(None),
+        }
+    }
+
+    pub fn remaining_budget(&self) -> Result<Duration, AppError> {
+        let now = Instant::now();
+        if now >= self.deadline {
+            return Err(AppError::Timeout(format!(
+                "run exceeded configured timeout of {:?}",
+                self.timeout
+            )));
+        }
+        Ok(self.deadline.saturating_duration_since(now))
+    }
+
+    pub fn ensure_mutating_access(&self) -> Result<(), AppError> {
+        let _ = self.remaining_budget()?;
+        if self.execution_guard.borrow().is_some() {
+            return Ok(());
+        }
+        let guard = self
+            .session_store
+            .acquire_execution_lock(&self.session_id, self.session_revision)?;
+        self.execution_guard.replace(Some(guard));
+        Ok(())
+    }
+
+    pub fn into_execution_guard(self) -> Option<SessionExecutionGuard> {
+        self.execution_guard.into_inner()
+    }
 }
 
 impl<'a> ToolContext<'a> {
@@ -53,6 +126,7 @@ impl<'a> ToolContext<'a> {
         plan_mode: bool,
         shell: &'a str,
         shell_args: &'a [String],
+        run_control: &'a RunControl,
     ) -> Self {
         Self {
             cwd,
@@ -61,6 +135,7 @@ impl<'a> ToolContext<'a> {
             plan_mode,
             shell,
             shell_args,
+            run_control,
             sequence: AtomicUsize::new(1),
         }
     }
@@ -93,6 +168,10 @@ impl<'a> ToolContext<'a> {
                 "arguments": arguments,
             }),
         )
+    }
+
+    pub fn remaining_budget(&self) -> Result<Duration, AppError> {
+        self.run_control.remaining_budget()
     }
 }
 
@@ -128,8 +207,19 @@ pub fn execute_tool(
             }),
         );
     }
+    let behavior = tool_behavior(name);
+    let _ = context.remaining_budget()?;
     if context.plan_mode {
         return context.planned(name, arguments);
+    }
+    if matches!(
+        behavior,
+        Some(ToolBehavior {
+            access: ToolAccess::Mutating,
+            ..
+        })
+    ) {
+        context.run_control.ensure_mutating_access()?;
     }
 
     let payload = match name {
@@ -151,6 +241,20 @@ pub fn execute_tool(
         }
     };
     context.finalize(name, &payload)
+}
+
+pub fn tool_behavior(name: &str) -> Option<ToolBehavior> {
+    match name {
+        "read_file" | "glob" | "grep" => Some(ToolBehavior {
+            access: ToolAccess::ReadOnly,
+            retryable: true,
+        }),
+        "edit_file" | "write_file" | "apply_patch" | "bash" => Some(ToolBehavior {
+            access: ToolAccess::Mutating,
+            retryable: false,
+        }),
+        _ => None,
+    }
 }
 
 pub fn resolve_path(cwd: &Path, value: &str) -> PathBuf {

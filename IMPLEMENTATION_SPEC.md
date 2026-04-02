@@ -513,7 +513,6 @@ Future model parameters may be added, but do not design a huge generic parameter
 - `revision`
 - `char_count`
 - `model`
-- `plan_enabled`
 - `initial_role`
 - `cwd`
 - `agent_name`
@@ -530,7 +529,6 @@ Suggested example:
   "char_count": 12549,
   "agent_name": "coder",
   "model": "gpt-4o-mini",
-  "plan_enabled": false,
   "initial_role": null,
   "cwd": "/Users/ysera/project",
   "effort": "high"
@@ -836,6 +834,7 @@ Behavior:
 - no side-effecting tool execution
 - tools return planned actions instead of performing work
 - the assistant should explain what it would do
+- the setting applies only to the current invocation
 
 For tools with pure read behavior, decide carefully whether "plan" should still allow reads.
 

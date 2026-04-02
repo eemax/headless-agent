@@ -11,9 +11,10 @@ Implemented now:
 - prompt runs with `--session`, `--agent`, optional `--role`, `--model`, `--effort`, `--plan`, and `--cwd`
 - OpenRouter chat completions integration
 - session metadata and JSONL transcript persistence
-- optimistic same-session conflict detection
+- optimistic same-session conflict detection plus a dedicated mutating-run execution lock
 - built-in tools: `read_file`, `edit_file`, `write_file`, `glob`, `grep`, `apply_patch`, `bash`
 - repo-owned starter assets in `agents/`, `roles/`, `prompts/`, and `config.toml`
+- total run timeout enforcement across provider calls and tool execution
 
 Deferred for a later pass:
 - `todo_write`
@@ -57,7 +58,7 @@ Run in plan mode:
 cargo run -- --session new --agent coder --plan "inspect the project and propose edits"
 ```
 
-In `--plan` mode, all built-in tools return planned actions instead of executing, including read-only tools.
+In `--plan` mode, all built-in tools return planned actions instead of executing, including read-only tools. `--plan` is per-run only; it is not persisted in session metadata.
 
 ## Configuration Roots
 

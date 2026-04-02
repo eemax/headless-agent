@@ -2,6 +2,7 @@ pub mod jsonl;
 
 use std::{
     fs::{self, File, OpenOptions},
+    io,
     path::PathBuf,
 };
 
@@ -20,6 +21,11 @@ pub struct SessionStore {
     pub sessions_dir: PathBuf,
 }
 
+#[derive(Debug)]
+pub struct SessionExecutionGuard {
+    file: File,
+}
+
 #[derive(Debug, Clone)]
 pub struct SessionCommit {
     pub expected_revision: u64,
@@ -29,7 +35,6 @@ pub struct SessionCommit {
     pub bind_model: Option<String>,
     pub bind_effort: Option<Effort>,
     pub bind_cwd: Option<String>,
-    pub bind_plan_enabled: Option<bool>,
     pub bind_initial_role: Option<String>,
 }
 
@@ -52,6 +57,7 @@ impl SessionStore {
         fs::create_dir_all(session_dir.join("runs"))?;
         File::create(session_dir.join("messages.jsonl"))?;
         File::create(session_dir.join("lock"))?;
+        File::create(session_dir.join("execution.lock"))?;
         let now = now_rfc3339()?;
         let meta = SessionMeta {
             session_id: session_id.clone(),
@@ -62,7 +68,6 @@ impl SessionStore {
             char_count: 0,
             agent_name: None,
             model: None,
-            plan_enabled: None,
             initial_role: None,
             cwd: None,
             effort: None,
@@ -110,11 +115,13 @@ impl SessionStore {
     }
 
     pub fn stop_session(&self, session_id: &str) -> Result<SessionMeta, AppError> {
+        let _ = self.load_meta(session_id)?;
         let lock_path = self.session_dir(session_id).join("lock");
         let lock = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(&lock_path)?;
         lock.lock_exclusive()?;
         let mut meta = self.load_meta(session_id)?;
@@ -129,14 +136,19 @@ impl SessionStore {
         &self,
         session_id: &str,
         commit: SessionCommit,
+        execution_guard: Option<&SessionExecutionGuard>,
     ) -> Result<SessionMeta, AppError> {
         let lock_path = self.session_dir(session_id).join("lock");
         let lock = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(&lock_path)?;
         lock.lock_exclusive()?;
+        if execution_guard.is_none() {
+            self.fail_if_execution_locked(session_id)?;
+        }
         let mut meta = self.load_meta(session_id)?;
         if meta.revision != commit.expected_revision {
             lock.unlock()?;
@@ -159,7 +171,6 @@ impl SessionStore {
             meta.model = commit.bind_model;
             meta.effort = commit.bind_effort;
             meta.cwd = commit.bind_cwd;
-            meta.plan_enabled = commit.bind_plan_enabled;
             meta.initial_role = commit.bind_initial_role;
         }
         meta.updated_at = now_rfc3339()?;
@@ -170,12 +181,83 @@ impl SessionStore {
         Ok(meta)
     }
 
+    pub fn acquire_execution_lock(
+        &self,
+        session_id: &str,
+        expected_revision: u64,
+    ) -> Result<SessionExecutionGuard, AppError> {
+        let file = self.open_execution_lock(session_id)?;
+        match file.try_lock_exclusive() {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                return Err(AppError::SessionConflict(format!(
+                    "session `{session_id}` already has a mutating run in progress"
+                )));
+            }
+            Err(error) => return Err(error.into()),
+        }
+
+        let meta = match self.load_meta(session_id) {
+            Ok(meta) => meta,
+            Err(error) => {
+                let _ = file.unlock();
+                return Err(error);
+            }
+        };
+        if meta.revision != expected_revision {
+            let _ = file.unlock();
+            return Err(AppError::SessionConflict(format!(
+                "session `{session_id}` was updated concurrently"
+            )));
+        }
+        if meta.stopped_at.is_some() {
+            let _ = file.unlock();
+            return Err(AppError::Session(format!(
+                "session `{session_id}` has been stopped and cannot accept new runs"
+            )));
+        }
+
+        Ok(SessionExecutionGuard { file })
+    }
+
     fn write_meta(&self, meta: &SessionMeta) -> Result<(), AppError> {
         let session_dir = self.session_dir(&meta.session_id);
         fs::create_dir_all(&session_dir)?;
         let path = session_dir.join("meta.json");
         fs::write(path, serde_json::to_vec_pretty(meta)?)?;
         Ok(())
+    }
+
+    fn fail_if_execution_locked(&self, session_id: &str) -> Result<(), AppError> {
+        let file = self.open_execution_lock(session_id)?;
+        match file.try_lock_exclusive() {
+            Ok(()) => {
+                file.unlock()?;
+                Ok(())
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                Err(AppError::SessionConflict(format!(
+                    "session `{session_id}` already has a mutating run in progress"
+                )))
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn open_execution_lock(&self, session_id: &str) -> Result<File, AppError> {
+        let path = self.session_dir(session_id).join("execution.lock");
+        Ok(OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)?)
+    }
+}
+
+impl Drop for SessionExecutionGuard {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
     }
 }
 

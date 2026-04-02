@@ -21,6 +21,7 @@ pub fn glob_spec() -> crate::tools::ToolSpec {
 }
 
 pub fn glob_search(context: &ToolContext<'_>, arguments: &Value) -> Result<Value, AppError> {
+    let _ = context.remaining_budget()?;
     let pattern = require_string(arguments, "pattern")?;
     let pattern = if pattern.starts_with('/') {
         pattern
@@ -32,6 +33,7 @@ pub fn glob_search(context: &ToolContext<'_>, arguments: &Value) -> Result<Value
     for entry in
         glob(&pattern).map_err(|err| AppError::Tool(format!("invalid glob pattern: {err}")))?
     {
+        let _ = context.remaining_budget()?;
         let path = entry.map_err(|err| AppError::Tool(format!("glob error: {err}")))?;
         let display = path
             .strip_prefix(context.cwd)

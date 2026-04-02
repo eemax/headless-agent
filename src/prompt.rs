@@ -28,16 +28,16 @@ pub fn assemble_prompt(
         tool_calls: Vec::new(),
     });
 
-    if let Some(role) = role {
-        if let Some(system_prompt) = &role.system_prompt {
-            messages.push(PromptMessage {
-                role: MessageRole::System,
-                content: Some(system_prompt.clone()),
-                name: None,
-                tool_call_id: None,
-                tool_calls: Vec::new(),
-            });
-        }
+    if let Some(role) = role
+        && let Some(system_prompt) = &role.system_prompt
+    {
+        messages.push(PromptMessage {
+            role: MessageRole::System,
+            content: Some(system_prompt.clone()),
+            name: None,
+            tool_call_id: None,
+            tool_calls: Vec::new(),
+        });
     }
 
     for record in history {
@@ -51,12 +51,12 @@ pub fn assemble_prompt(
     }
 
     let mut current_prompt = String::new();
-    if let Some(role) = role {
-        if let Some(prefix) = &role.user_prefix {
-            current_prompt.push_str(prefix);
-            if !prefix.ends_with('\n') {
-                current_prompt.push('\n');
-            }
+    if let Some(role) = role
+        && let Some(prefix) = &role.user_prefix
+    {
+        current_prompt.push_str(prefix);
+        if !prefix.ends_with('\n') {
+            current_prompt.push('\n');
         }
     }
     current_prompt.push_str(user_prompt);

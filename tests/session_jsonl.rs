@@ -30,7 +30,7 @@ fn new_sessions_start_unbound_with_nullable_runtime_fields() {
     assert_eq!(meta["model"], Value::Null);
     assert_eq!(meta["effort"], Value::Null);
     assert_eq!(meta["cwd"], Value::Null);
-    assert_eq!(meta["plan_enabled"], Value::Null);
+    assert!(meta.get("plan_enabled").is_none());
 }
 
 #[test]
@@ -89,4 +89,36 @@ fn same_session_conflicts_fail_cleanly() {
         .lines()
         .count();
     assert_eq!(line_count, 2);
+}
+
+#[test]
+fn user_messages_are_timestamped_before_assistant_messages() {
+    let server = FakeOpenRouter::start(vec![ResponseSpec::delayed_json(
+        json!({ "choices": [{ "message": { "content": "hello" } }] }),
+        300,
+    )]);
+    let workspace = TestWorkspace::new();
+    workspace.write_repo_assets(&server.url());
+
+    let output = workspace
+        .command()
+        .args(["--session", "new", "--agent", "coder", "check timestamps"])
+        .output()
+        .expect("timestamp run");
+    assert!(output.status.success());
+    let session_id =
+        common::extract_created_session_id(&String::from_utf8(output.stderr).expect("stderr"));
+
+    let messages_path = workspace
+        .sessions_dir
+        .join(session_id)
+        .join("messages.jsonl");
+    let records: Vec<Value> = fs::read_to_string(messages_path)
+        .expect("messages")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("json line"))
+        .collect();
+    assert_eq!(records[0]["role"], "user");
+    assert_eq!(records[1]["role"], "assistant");
+    assert!(records[0]["ts"].as_str() <= records[1]["ts"].as_str());
 }

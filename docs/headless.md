@@ -215,6 +215,7 @@ timeout = "2h"
 - Type: duration string
 - Supported suffixes: `h`, `m`, `s`
 - Default at runtime: `"2h"`
+- Purpose: total wall-clock run timeout across provider calls, tool execution, and loop overhead
 
 ### Tool Names
 
@@ -237,6 +238,8 @@ Current effective value precedence is:
 2. stored sticky session defaults, once the session has been bound
 3. agent file values
 4. global config or process environment fallback where applicable
+
+`--plan` is intentionally not part of session-default precedence. It applies only to the current invocation.
 
 ## Role Files
 
@@ -297,12 +300,11 @@ New sessions start with:
   "model": null,
   "effort": null,
   "cwd": null,
-  "plan_enabled": null,
   "initial_role": null
 }
 ```
 
-On the first successful prompt run, those fields are bound from the effective runtime values and then reused as sticky defaults when later runs omit them.
+On the first successful prompt run, those fields are bound from the effective runtime values and then reused as sticky defaults when later runs omit them. Plan mode is never stored in session metadata.
 
 ## First-Pass Limitations
 
@@ -314,3 +316,4 @@ These config surfaces are intentionally not active yet:
 
 Plan-mode behavior is also intentionally strict in this pass:
 - `--plan` makes all built-in tools non-executing, including reads
+- `--plan` applies only to the current run

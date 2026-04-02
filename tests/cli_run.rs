@@ -1,6 +1,6 @@
 mod common;
 
-use std::{fs, path::PathBuf};
+use std::{fs, path::Path};
 
 use serde_json::Value;
 use serde_json::json;
@@ -45,7 +45,7 @@ fn session_new_convenience_keeps_stdout_clean_and_binds_the_session() {
     assert_eq!(meta["agent_name"], "coder");
     assert_eq!(meta["model"], "openai/gpt-4.1");
     assert_eq!(meta["effort"], "medium");
-    assert_eq!(meta["plan_enabled"], false);
+    assert!(meta.get("plan_enabled").is_none());
     assert_eq!(meta["revision"], 1);
 }
 
@@ -112,6 +112,91 @@ fn later_run_overrides_do_not_mutate_sticky_session_defaults() {
 }
 
 #[test]
+fn plan_mode_is_per_run_instead_of_sticky_session_state() {
+    let server = FakeOpenRouter::start(vec![
+        ResponseSpec::json(json!({
+            "choices": [{
+                "message": {
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "function": {
+                            "name": "write_file",
+                            "arguments": "{\"path\":\"planned.txt\",\"content\":\"from plan\"}"
+                        }
+                    }]
+                }
+            }]
+        })),
+        ResponseSpec::json(json!({
+            "choices": [{
+                "message": {
+                    "content": "planned run"
+                }
+            }]
+        })),
+        ResponseSpec::json(json!({
+            "choices": [{
+                "message": {
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_2",
+                        "function": {
+                            "name": "write_file",
+                            "arguments": "{\"path\":\"real.txt\",\"content\":\"real write\"}"
+                        }
+                    }]
+                }
+            }]
+        })),
+        ResponseSpec::json(json!({
+            "choices": [{
+                "message": {
+                    "content": "real run"
+                }
+            }]
+        })),
+    ]);
+    let workspace = TestWorkspace::new();
+    workspace.write_repo_assets(&server.url());
+
+    let first = workspace
+        .command()
+        .args([
+            "--session",
+            "new",
+            "--agent",
+            "coder",
+            "--plan",
+            "--cwd",
+            workspace.worktree.to_str().expect("cwd"),
+            "plan run",
+        ])
+        .output()
+        .expect("plan run");
+    assert!(first.status.success());
+    let session_id = extract_created_session_id(&String::from_utf8(first.stderr).expect("stderr"));
+    assert!(!workspace.worktree.join("planned.txt").exists());
+
+    let second = workspace
+        .command()
+        .args([
+            "--session",
+            &session_id,
+            "--cwd",
+            workspace.worktree.to_str().expect("cwd"),
+            "real run",
+        ])
+        .output()
+        .expect("real run");
+    assert!(second.status.success());
+    assert_eq!(
+        fs::read_to_string(workspace.worktree.join("real.txt")).expect("real file"),
+        "real write"
+    );
+}
+
+#[test]
 fn stopped_sessions_reject_new_prompt_runs() {
     let workspace = TestWorkspace::new();
     workspace.write_repo_assets("http://127.0.0.1:9");
@@ -148,6 +233,94 @@ fn stopped_sessions_reject_new_prompt_runs() {
     );
 }
 
-fn path_string(path: &PathBuf) -> String {
+#[test]
+fn session_stop_missing_id_returns_session_error_code() {
+    let workspace = TestWorkspace::new();
+    workspace.write_repo_assets("http://127.0.0.1:9");
+
+    let output = workspace
+        .command()
+        .args(["session", "stop", "missing"])
+        .output()
+        .expect("stop missing");
+    assert_eq!(output.status.code(), Some(4));
+    assert!(
+        String::from_utf8(output.stderr)
+            .expect("stderr")
+            .contains("does not exist")
+    );
+}
+
+#[test]
+fn provider_timeout_returns_timeout_exit_code() {
+    let server = FakeOpenRouter::start(vec![ResponseSpec::delayed_json(
+        json!({
+            "choices": [{
+                "message": {
+                    "content": "too slow"
+                }
+            }]
+        }),
+        1_500,
+    )]);
+    let workspace = TestWorkspace::new();
+    workspace.write_repo_assets_with_timeout(&server.url(), "1s");
+
+    let output = workspace
+        .command()
+        .args(["--session", "new", "--agent", "coder", "slow provider"])
+        .output()
+        .expect("provider timeout");
+    assert_eq!(output.status.code(), Some(7));
+}
+
+#[test]
+fn combined_tool_and_provider_time_budget_returns_timeout_exit_code() {
+    let server = FakeOpenRouter::start(vec![
+        ResponseSpec::json(json!({
+            "choices": [{
+                "message": {
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "function": {
+                            "name": "bash",
+                            "arguments": "{\"command\":\"sleep 0.6\"}"
+                        }
+                    }]
+                }
+            }]
+        })),
+        ResponseSpec::delayed_json(
+            json!({
+                "choices": [{
+                    "message": {
+                        "content": "too late"
+                    }
+                }]
+            }),
+            600,
+        ),
+    ]);
+    let workspace = TestWorkspace::new();
+    workspace.write_repo_assets_with_timeout(&server.url(), "1s");
+
+    let output = workspace
+        .command()
+        .args([
+            "--session",
+            "new",
+            "--agent",
+            "coder",
+            "--cwd",
+            workspace.worktree.to_str().expect("cwd"),
+            "mixed timeout",
+        ])
+        .output()
+        .expect("mixed timeout");
+    assert_eq!(output.status.code(), Some(7));
+}
+
+fn path_string(path: &Path) -> String {
     path.display().to_string()
 }

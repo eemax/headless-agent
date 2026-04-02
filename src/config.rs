@@ -172,22 +172,20 @@ impl HeadlessRoots {
 
     fn list_named(&self, dir: &str) -> Result<Vec<String>, AppError> {
         let mut names = BTreeSet::new();
-        for root in [&self.repo_root, &self.home_root] {
-            if let Some(root) = root {
-                let path = root.join(dir);
-                if !path.exists() {
-                    continue;
-                }
-                for entry in fs::read_dir(&path).map_err(|err| {
-                    AppError::Config(format!("failed to list {}: {err}", path.display()))
-                })? {
-                    let entry = entry?;
-                    let path = entry.path();
-                    if path.extension().and_then(|value| value.to_str()) == Some("toml") {
-                        if let Some(stem) = path.file_stem().and_then(|value| value.to_str()) {
-                            names.insert(stem.to_string());
-                        }
-                    }
+        for root in [&self.repo_root, &self.home_root].into_iter().flatten() {
+            let path = root.join(dir);
+            if !path.exists() {
+                continue;
+            }
+            for entry in fs::read_dir(&path).map_err(|err| {
+                AppError::Config(format!("failed to list {}: {err}", path.display()))
+            })? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.extension().and_then(|value| value.to_str()) == Some("toml")
+                    && let Some(stem) = path.file_stem().and_then(|value| value.to_str())
+                {
+                    names.insert(stem.to_string());
                 }
             }
         }

@@ -1,4 +1,8 @@
-use std::fs;
+use std::{
+    collections::HashSet,
+    fs,
+    path::{Path, PathBuf},
+};
 
 use serde_json::{Value, json};
 
@@ -22,69 +26,15 @@ pub fn apply_patch_spec() -> crate::tools::ToolSpec {
 }
 
 pub fn apply_patch(context: &ToolContext<'_>, arguments: &Value) -> Result<Value, AppError> {
+    let _ = context.remaining_budget()?;
     let patch = require_string(arguments, "patch")?;
     let operations = parse_patch(&patch)?;
-    let mut changed = Vec::new();
-    for operation in operations {
-        match operation {
-            PatchOp::Add { path, lines } => {
-                let path = resolve_path(context.cwd, &path);
-                if path.exists() {
-                    return Err(AppError::Tool(format!(
-                        "cannot add {}; file already exists",
-                        path.display()
-                    )));
-                }
-                if let Some(parent) = path.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-                fs::write(&path, join_lines(&lines))?;
-                changed.push(path.display().to_string());
-            }
-            PatchOp::Delete { path } => {
-                let path = resolve_path(context.cwd, &path);
-                if !path.exists() {
-                    return Err(AppError::Tool(format!(
-                        "cannot delete {}; file does not exist",
-                        path.display()
-                    )));
-                }
-                fs::remove_file(&path)?;
-                changed.push(path.display().to_string());
-            }
-            PatchOp::Update {
-                path,
-                move_to,
-                hunks,
-            } => {
-                let path = resolve_path(context.cwd, &path);
-                let original = fs::read_to_string(&path).map_err(|err| {
-                    AppError::Tool(format!("failed to read {}: {err}", path.display()))
-                })?;
-                let updated = apply_hunks(&original, &hunks)?;
-                let final_path = move_to
-                    .as_deref()
-                    .map(|value| resolve_path(context.cwd, value))
-                    .unwrap_or_else(|| path.clone());
-                if let Some(parent) = final_path.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-                fs::write(&final_path, updated)?;
-                if let Some(move_to) = move_to {
-                    if final_path != path {
-                        fs::remove_file(&path)?;
-                        changed.push(format!("{} -> {}", path.display(), move_to));
-                    }
-                } else {
-                    changed.push(final_path.display().to_string());
-                }
-            }
-        }
-    }
+    let plan = build_execution_plan(context, operations)?;
+    commit_execution_plan(context, &plan)?;
 
     Ok(json!({
         "ok": true,
-        "changed": changed,
+        "changed": plan.changed,
     }))
 }
 
@@ -108,6 +58,13 @@ enum PatchOp {
 struct PatchHunk {
     old_lines: Vec<String>,
     new_lines: Vec<String>,
+}
+
+#[derive(Debug)]
+struct ExecutionPlan {
+    writes: Vec<(PathBuf, String)>,
+    deletes: Vec<PathBuf>,
+    changed: Vec<String>,
 }
 
 fn parse_patch(input: &str) -> Result<Vec<PatchOp>, AppError> {
@@ -153,11 +110,11 @@ fn parse_patch(input: &str) -> Result<Vec<PatchOp>, AppError> {
         if let Some(path) = line.strip_prefix("*** Update File: ") {
             index += 1;
             let mut move_to = None;
-            if index < lines.len() - 1 {
-                if let Some(target) = lines[index].strip_prefix("*** Move to: ") {
-                    move_to = Some(target.to_string());
-                    index += 1;
-                }
+            if index < lines.len() - 1
+                && let Some(target) = lines[index].strip_prefix("*** Move to: ")
+            {
+                move_to = Some(target.to_string());
+                index += 1;
             }
             let mut change_lines = Vec::new();
             while index < lines.len() - 1 && !lines[index].starts_with("*** ") {
@@ -227,6 +184,116 @@ fn change_lines_to_hunk(lines: &[String]) -> Result<PatchHunk, AppError> {
         old_lines,
         new_lines,
     })
+}
+
+fn build_execution_plan(
+    context: &ToolContext<'_>,
+    operations: Vec<PatchOp>,
+) -> Result<ExecutionPlan, AppError> {
+    let mut writes = Vec::new();
+    let mut deletes = Vec::new();
+    let mut changed = Vec::new();
+    let mut touched_paths = HashSet::new();
+
+    for operation in operations {
+        let _ = context.remaining_budget()?;
+        match operation {
+            PatchOp::Add { path, lines } => {
+                let path = resolve_path(context.cwd, &path);
+                reserve_path(&mut touched_paths, &path)?;
+                if path.exists() {
+                    return Err(AppError::Tool(format!(
+                        "cannot add {}; file already exists",
+                        path.display()
+                    )));
+                }
+                changed.push(path.display().to_string());
+                writes.push((path, join_lines(&lines)));
+            }
+            PatchOp::Delete { path } => {
+                let path = resolve_path(context.cwd, &path);
+                reserve_path(&mut touched_paths, &path)?;
+                if !path.exists() {
+                    return Err(AppError::Tool(format!(
+                        "cannot delete {}; file does not exist",
+                        path.display()
+                    )));
+                }
+                changed.push(path.display().to_string());
+                deletes.push(path);
+            }
+            PatchOp::Update {
+                path,
+                move_to,
+                hunks,
+            } => {
+                let source_path = resolve_path(context.cwd, &path);
+                reserve_path(&mut touched_paths, &source_path)?;
+                let original = fs::read_to_string(&source_path).map_err(|err| {
+                    AppError::Tool(format!("failed to read {}: {err}", source_path.display()))
+                })?;
+                let updated = apply_hunks(&original, &hunks)?;
+                let final_path = move_to
+                    .as_deref()
+                    .map(|value| resolve_path(context.cwd, value))
+                    .unwrap_or_else(|| source_path.clone());
+
+                if final_path != source_path {
+                    reserve_path(&mut touched_paths, &final_path)?;
+                    if final_path.exists() {
+                        return Err(AppError::Tool(format!(
+                            "cannot move to {}; destination already exists",
+                            final_path.display()
+                        )));
+                    }
+                    changed.push(format!(
+                        "{} -> {}",
+                        source_path.display(),
+                        final_path.display()
+                    ));
+                    writes.push((final_path, updated));
+                    deletes.push(source_path);
+                } else {
+                    changed.push(source_path.display().to_string());
+                    writes.push((source_path, updated));
+                }
+            }
+        }
+    }
+
+    Ok(ExecutionPlan {
+        writes,
+        deletes,
+        changed,
+    })
+}
+
+fn commit_execution_plan(context: &ToolContext<'_>, plan: &ExecutionPlan) -> Result<(), AppError> {
+    for (path, content) in &plan.writes {
+        let _ = context.remaining_budget()?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, content)?;
+    }
+    for path in &plan.deletes {
+        let _ = context.remaining_budget()?;
+        if path.exists() {
+            fs::remove_file(path)?;
+        }
+    }
+    Ok(())
+}
+
+fn reserve_path(paths: &mut HashSet<PathBuf>, path: &Path) -> Result<(), AppError> {
+    if paths.insert(path.to_path_buf()) {
+        Ok(())
+    } else {
+        Err(AppError::Tool(format!(
+            "patch touches `{}` more than once",
+            path.display()
+        )))
+    }
 }
 
 fn apply_hunks(original: &str, hunks: &[PatchHunk]) -> Result<String, AppError> {

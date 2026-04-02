@@ -56,6 +56,7 @@ pub fn write_file_spec() -> crate::tools::ToolSpec {
 }
 
 pub fn read_file(_context: &ToolContext<'_>, arguments: &Value) -> Result<Value, AppError> {
+    let _ = _context.remaining_budget()?;
     let path = require_string(arguments, "path")?;
     let path = resolve_path(_context.cwd, &path);
     let content = fs::read_to_string(&path)
@@ -97,6 +98,7 @@ pub fn read_file(_context: &ToolContext<'_>, arguments: &Value) -> Result<Value,
 }
 
 pub fn edit_file(context: &ToolContext<'_>, arguments: &Value) -> Result<Value, AppError> {
+    let _ = context.remaining_budget()?;
     let path = require_string(arguments, "path")?;
     let old_text = require_string(arguments, "old_text")?;
     let new_text = require_string(arguments, "new_text")?;
@@ -124,6 +126,7 @@ pub fn edit_file(context: &ToolContext<'_>, arguments: &Value) -> Result<Value, 
 }
 
 pub fn write_file(context: &ToolContext<'_>, arguments: &Value) -> Result<Value, AppError> {
+    let _ = context.remaining_budget()?;
     let path = require_string(arguments, "path")?;
     let content = require_string(arguments, "content")?;
     let create_parents = optional_bool(arguments, "create_parents", false);

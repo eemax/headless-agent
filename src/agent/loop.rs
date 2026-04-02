@@ -7,11 +7,12 @@ use crate::{
     artifact::store_text_artifact,
     config::GlobalConfig,
     error::AppError,
-    provider::openrouter::OpenRouterClient,
-    tools::{ToolContext, builtin_specs, execute_tool},
+    provider::openrouter::{ChatRequest, OpenRouterClient},
+    session::SessionStore,
+    tools::{RunControl, ToolContext, builtin_specs, execute_tool, tool_behavior},
     types::{
-        MessageRole, PromptMessage, RunArtifacts, RunResult, ToolCallRecord, ToolExecution,
-        TranscriptRecord,
+        MessageRole, PromptMessage, RunArtifacts, RunOutcome, RunResult, ToolCallRecord,
+        ToolExecution, TranscriptRecord,
     },
 };
 
@@ -20,6 +21,7 @@ pub struct AgentRunContext {
     pub session_id: String,
     pub run_id: String,
     pub run_dir: std::path::PathBuf,
+    pub session_revision: u64,
     pub model: String,
     pub cwd: std::path::PathBuf,
     pub effort: crate::types::Effort,
@@ -27,13 +29,14 @@ pub struct AgentRunContext {
     pub prompt_messages: Vec<PromptMessage>,
     pub agent: LoadedAgent,
     pub config: GlobalConfig,
+    pub session_store: SessionStore,
     pub api_key: String,
 }
 
 const STEP_CAP: usize = 24;
 const TOOL_RETRY_CAP: usize = 2;
 
-pub fn run_agent_loop(context: AgentRunContext) -> Result<RunResult, AppError> {
+pub fn run_agent_loop(context: AgentRunContext) -> Result<RunOutcome, AppError> {
     let base_url = context
         .agent
         .def
@@ -42,8 +45,14 @@ pub fn run_agent_loop(context: AgentRunContext) -> Result<RunResult, AppError> {
         .unwrap_or_else(|| "https://openrouter.ai/api/v1".to_string());
     let timeout = Duration::from_secs(context.agent.timeout_seconds()?);
     let max_output_tokens = context.agent.def.max_output_tokens.unwrap_or(12_000);
-    let client = OpenRouterClient::new(base_url, context.api_key.clone(), timeout);
+    let client = OpenRouterClient::new(base_url, context.api_key.clone());
     let tool_specs = builtin_specs(&context.agent.def.enabled_tools);
+    let run_control = RunControl::new(
+        context.session_store.clone(),
+        context.session_id.clone(),
+        context.session_revision,
+        timeout,
+    );
     let tool_context = ToolContext::new(
         &context.cwd,
         &context.run_dir,
@@ -51,20 +60,23 @@ pub fn run_agent_loop(context: AgentRunContext) -> Result<RunResult, AppError> {
         context.plan_mode,
         &context.config.shell,
         &context.config.shell_args,
+        &run_control,
     );
     let mut prompt_messages = context.prompt_messages.clone();
     let mut records = Vec::new();
     let mut artifacts = RunArtifacts::default();
 
     for step in 0..STEP_CAP {
-        let response = client.send_chat(
-            &context.session_id,
-            &context.model,
-            context.effort,
-            &prompt_messages,
-            &tool_specs,
+        let remaining_budget = run_control.remaining_budget()?;
+        let response = client.send_chat(ChatRequest {
+            session_id: &context.session_id,
+            model: &context.model,
+            effort: context.effort,
+            messages: &prompt_messages,
+            tools: &tool_specs,
             max_output_tokens,
-        )?;
+            timeout: remaining_budget,
+        })?;
 
         let (assistant_content, assistant_artifact) =
             assistant_content_to_record(&context, step, response.content.as_deref())?;
@@ -94,16 +106,19 @@ pub fn run_agent_loop(context: AgentRunContext) -> Result<RunResult, AppError> {
         });
 
         if response.tool_calls.is_empty() {
-            return Ok(RunResult {
-                final_text: response.content.unwrap_or_default(),
-                records,
-                artifacts,
+            return Ok(RunOutcome {
+                result: RunResult {
+                    final_text: response.content.unwrap_or_default(),
+                    records,
+                    artifacts,
+                },
+                execution_guard: run_control.into_execution_guard(),
             });
         }
 
         for tool_call in response.tool_calls {
             let execution =
-                execute_with_retry(&tool_context, &context.agent.def.enabled_tools, &tool_call);
+                execute_with_retry(&tool_context, &context.agent.def.enabled_tools, &tool_call)?;
             if let Some(artifact) = &execution.artifact {
                 artifacts.paths.push(artifact.clone());
             }
@@ -139,8 +154,11 @@ fn execute_with_retry(
     tool_context: &ToolContext<'_>,
     enabled_tools: &[String],
     tool_call: &ToolCallRecord,
-) -> ToolExecution {
+) -> Result<ToolExecution, AppError> {
     let mut attempts = 0;
+    let retryable = tool_behavior(&tool_call.name)
+        .map(|behavior| behavior.retryable)
+        .unwrap_or(false);
     loop {
         attempts += 1;
         match execute_tool(
@@ -149,28 +167,23 @@ fn execute_with_retry(
             &tool_call.name,
             &tool_call.arguments,
         ) {
-            Ok(result) => return result,
-            Err(error) if attempts <= TOOL_RETRY_CAP => continue,
-            Err(error) => {
-                return tool_context
-                    .finalize(
-                        &tool_call.name,
-                        &json!({
-                            "ok": false,
-                            "error": error.to_string(),
-                            "attempts": attempts,
-                        }),
-                    )
-                    .unwrap_or_else(|finalize_error| ToolExecution {
-                        content: json!({
-                            "ok": false,
-                            "error": finalize_error.to_string(),
-                        })
-                        .to_string(),
-                        preview: None,
-                        artifact: None,
-                    });
+            Ok(result) => return Ok(result),
+            Err(AppError::Tool(_)) | Err(AppError::Shell(_))
+                if retryable && attempts <= TOOL_RETRY_CAP =>
+            {
+                continue;
             }
+            Err(AppError::Tool(error)) | Err(AppError::Shell(error)) => {
+                return tool_context.finalize(
+                    &tool_call.name,
+                    &json!({
+                        "ok": false,
+                        "error": error,
+                        "attempts": attempts,
+                    }),
+                );
+            }
+            Err(error) => return Err(error),
         }
     }
 }
@@ -183,7 +196,7 @@ fn assistant_content_to_record(
     let Some(content) = content else {
         return Ok((None, None));
     };
-    if content.as_bytes().len() <= context.config.catastrophic_output_bytes {
+    if content.len() <= context.config.catastrophic_output_bytes {
         return Ok((Some(content.to_string()), None));
     }
 

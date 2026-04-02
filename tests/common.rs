@@ -15,6 +15,7 @@ use std::{
 };
 
 use assert_cmd::Command;
+use headless::{config::GlobalConfig, session::SessionStore, tools::RunControl};
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -49,14 +50,29 @@ impl TestWorkspace {
     }
 
     pub fn write_repo_assets(&self, base_url: &str) {
-        self.write_root_assets(&self.repo_root, base_url, "repo coder");
+        self.write_root_assets(&self.repo_root, base_url, "repo coder", "2h");
     }
 
     pub fn write_home_assets(&self, base_url: &str) {
-        self.write_root_assets(&self.home_root, base_url, "home coder");
+        self.write_root_assets(&self.home_root, base_url, "home coder", "2h");
+    }
+
+    pub fn write_repo_assets_with_timeout(&self, base_url: &str, timeout: &str) {
+        self.write_root_assets(&self.repo_root, base_url, "repo coder", timeout);
     }
 
     pub fn write_named_agent(&self, root: &Path, name: &str, base_url: &str, prompt_label: &str) {
+        self.write_named_agent_with_timeout(root, name, base_url, prompt_label, "2h");
+    }
+
+    pub fn write_named_agent_with_timeout(
+        &self,
+        root: &Path,
+        name: &str,
+        base_url: &str,
+        prompt_label: &str,
+        timeout: &str,
+    ) {
         fs::create_dir_all(root.join("agents")).expect("agents dir");
         fs::create_dir_all(root.join("prompts")).expect("prompts dir");
         fs::write(
@@ -72,7 +88,7 @@ max_output_tokens = 12000
 compaction_at_tokens = 180000
 enabled_tools = ["read_file", "edit_file", "write_file", "glob", "grep", "apply_patch", "bash"]
 system_prompt_file = "../prompts/{name}.md"
-timeout = "2h"
+timeout = "{timeout}"
 "#
             ),
         )
@@ -100,7 +116,7 @@ timeout = "2h"
         command
     }
 
-    fn write_root_assets(&self, root: &Path, base_url: &str, prompt_label: &str) {
+    fn write_root_assets(&self, root: &Path, base_url: &str, prompt_label: &str, timeout: &str) {
         fs::create_dir_all(root.join("agents")).expect("agents dir");
         fs::create_dir_all(root.join("roles")).expect("roles dir");
         fs::create_dir_all(root.join("prompts")).expect("prompts dir");
@@ -120,7 +136,7 @@ api_key_env = "OPENROUTER_API_KEY"
             ),
         )
         .expect("write config");
-        self.write_named_agent(root, "coder", base_url, prompt_label);
+        self.write_named_agent_with_timeout(root, "coder", base_url, prompt_label, timeout);
         fs::write(
             root.join("roles/auditor.toml"),
             r#"name = "auditor"
@@ -137,6 +153,19 @@ user_prefix_file = "../prompts/auditor-user.md"
         )
         .expect("write auditor user prompt");
     }
+}
+
+impl Default for TestWorkspace {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub fn new_run_control(config: &GlobalConfig, timeout: Duration) -> RunControl {
+    let store = SessionStore::new(config);
+    store.ensure_root().expect("ensure sessions");
+    let session = store.create_session().expect("create session");
+    RunControl::new(store, session.session_id, session.revision, timeout)
 }
 
 pub fn extract_created_session_id(stderr: &str) -> String {

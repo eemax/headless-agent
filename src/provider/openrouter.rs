@@ -13,7 +13,6 @@ use crate::{
 pub struct OpenRouterClient {
     base_url: String,
     api_key: String,
-    timeout: Duration,
 }
 
 #[derive(Debug, Clone)]
@@ -22,37 +21,35 @@ pub struct ProviderResponse {
     pub tool_calls: Vec<ToolCallRecord>,
 }
 
+pub struct ChatRequest<'a> {
+    pub session_id: &'a str,
+    pub model: &'a str,
+    pub effort: Effort,
+    pub messages: &'a [PromptMessage],
+    pub tools: &'a [ToolSpec],
+    pub max_output_tokens: usize,
+    pub timeout: Duration,
+}
+
 impl OpenRouterClient {
-    pub fn new(base_url: String, api_key: String, timeout: Duration) -> Self {
-        Self {
-            base_url,
-            api_key,
-            timeout,
-        }
+    pub fn new(base_url: String, api_key: String) -> Self {
+        Self { base_url, api_key }
     }
 
-    pub fn send_chat(
-        &self,
-        session_id: &str,
-        model: &str,
-        effort: Effort,
-        messages: &[PromptMessage],
-        tools: &[ToolSpec],
-        max_output_tokens: usize,
-    ) -> Result<ProviderResponse, AppError> {
+    pub fn send_chat(&self, request: ChatRequest<'_>) -> Result<ProviderResponse, AppError> {
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
         let payload = build_payload(
-            session_id,
-            model,
-            effort,
-            messages,
-            tools,
-            max_output_tokens,
+            request.session_id,
+            request.model,
+            request.effort,
+            request.messages,
+            request.tools,
+            request.max_output_tokens,
         );
         let agent = ureq::AgentBuilder::new()
-            .timeout_connect(self.timeout)
-            .timeout_read(self.timeout)
-            .timeout_write(self.timeout)
+            .timeout_connect(request.timeout)
+            .timeout_read(request.timeout)
+            .timeout_write(request.timeout)
             .build();
 
         let response = agent
@@ -77,7 +74,7 @@ impl OpenRouterClient {
                 if error.to_string().to_lowercase().contains("timed out") {
                     return Err(AppError::Timeout(format!(
                         "OpenRouter request timed out after {:?}",
-                        self.timeout
+                        request.timeout
                     )));
                 }
                 return Err(AppError::Provider(format!(
@@ -103,7 +100,7 @@ impl OpenRouterClient {
                 id: tool_call.id,
                 name: tool_call.function.name,
                 arguments: serde_json::from_str(&tool_call.function.arguments)
-                    .unwrap_or_else(|_| Value::String(tool_call.function.arguments)),
+                    .unwrap_or(Value::String(tool_call.function.arguments)),
             })
             .collect();
 

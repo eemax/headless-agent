@@ -12,7 +12,6 @@ pub struct SessionMeta {
     pub char_count: usize,
     pub agent_name: Option<String>,
     pub model: Option<String>,
-    pub plan_enabled: Option<bool>,
     pub initial_role: Option<String>,
     pub cwd: Option<String>,
     pub effort: Option<Effort>,

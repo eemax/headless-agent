@@ -25,6 +25,7 @@ pub fn grep_spec() -> crate::tools::ToolSpec {
 }
 
 pub fn grep_search(context: &ToolContext<'_>, arguments: &Value) -> Result<Value, AppError> {
+    let _ = context.remaining_budget()?;
     let pattern = require_string(arguments, "pattern")?;
     let path = optional_string(arguments, "path").unwrap_or_else(|| ".".to_string());
     let root = resolve_path(context.cwd, &path);
@@ -33,6 +34,7 @@ pub fn grep_search(context: &ToolContext<'_>, arguments: &Value) -> Result<Value
 
     let mut matches = Vec::new();
     for entry in WalkDir::new(&root).into_iter().filter_map(Result::ok) {
+        let _ = context.remaining_budget()?;
         if !entry.file_type().is_file() {
             continue;
         }

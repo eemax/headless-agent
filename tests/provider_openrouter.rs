@@ -7,7 +7,7 @@ use serde_json::json;
 use common::{FakeOpenRouter, ResponseSpec};
 use headless::{
     error::AppError,
-    provider::openrouter::OpenRouterClient,
+    provider::openrouter::{ChatRequest, OpenRouterClient},
     tools::bash::bash_spec,
     types::{Effort, MessageRole, PromptMessage},
 };
@@ -23,14 +23,13 @@ fn openrouter_request_includes_reasoning_and_tool_definitions() {
             }
         ]
     }))]);
-    let client =
-        OpenRouterClient::new(server.url(), "test-key".to_string(), Duration::from_secs(5));
+    let client = OpenRouterClient::new(server.url(), "test-key".to_string());
     let response = client
-        .send_chat(
-            "session-1",
-            "openai/gpt-4.1",
-            Effort::High,
-            &[
+        .send_chat(ChatRequest {
+            session_id: "session-1",
+            model: "openai/gpt-4.1",
+            effort: Effort::High,
+            messages: &[
                 PromptMessage {
                     role: MessageRole::System,
                     content: Some("system".to_string()),
@@ -46,9 +45,10 @@ fn openrouter_request_includes_reasoning_and_tool_definitions() {
                     tool_calls: Vec::new(),
                 },
             ],
-            &[bash_spec()],
-            1234,
-        )
+            tools: &[bash_spec()],
+            max_output_tokens: 1234,
+            timeout: Duration::from_secs(5),
+        })
         .expect("provider response");
 
     assert_eq!(response.content.as_deref(), Some("ok"));
@@ -73,23 +73,23 @@ fn openrouter_maps_timeout_status_to_timeout_errors() {
         }),
         delay_ms: 0,
     }]);
-    let client =
-        OpenRouterClient::new(server.url(), "test-key".to_string(), Duration::from_secs(5));
+    let client = OpenRouterClient::new(server.url(), "test-key".to_string());
     let error = client
-        .send_chat(
-            "session-1",
-            "openai/gpt-4.1",
-            Effort::Medium,
-            &[PromptMessage {
+        .send_chat(ChatRequest {
+            session_id: "session-1",
+            model: "openai/gpt-4.1",
+            effort: Effort::Medium,
+            messages: &[PromptMessage {
                 role: MessageRole::User,
                 content: Some("hello".to_string()),
                 name: None,
                 tool_call_id: None,
                 tool_calls: Vec::new(),
             }],
-            &[],
-            128,
-        )
+            tools: &[],
+            max_output_tokens: 128,
+            timeout: Duration::from_secs(5),
+        })
         .expect_err("expected timeout error");
 
     match error {
@@ -105,26 +105,23 @@ fn openrouter_live_smoke_test() {
         Ok(value) if !value.is_empty() => value,
         _ => return,
     };
-    let client = OpenRouterClient::new(
-        "https://openrouter.ai/api/v1".to_string(),
-        api_key,
-        Duration::from_secs(30),
-    );
+    let client = OpenRouterClient::new("https://openrouter.ai/api/v1".to_string(), api_key);
     let response = client
-        .send_chat(
-            "live-smoke",
-            "openai/gpt-4.1-mini",
-            Effort::Minimal,
-            &[PromptMessage {
+        .send_chat(ChatRequest {
+            session_id: "live-smoke",
+            model: "openai/gpt-4.1-mini",
+            effort: Effort::Minimal,
+            messages: &[PromptMessage {
                 role: MessageRole::User,
                 content: Some("Reply with the single word ok.".to_string()),
                 name: None,
                 tool_call_id: None,
                 tool_calls: Vec::new(),
             }],
-            &[],
-            32,
-        )
+            tools: &[],
+            max_output_tokens: 32,
+            timeout: Duration::from_secs(30),
+        })
         .expect("live response");
     assert!(
         response

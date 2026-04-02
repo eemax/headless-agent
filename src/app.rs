@@ -14,8 +14,16 @@ use crate::{
     prompt::assemble_prompt,
     role_def::LoadedRole,
     session::{SessionCommit, SessionStore, new_id, now_rfc3339},
-    types::{MessageRole, RunResult, SessionMeta, TranscriptRecord},
+    types::{MessageRole, RunOutcome, RunResult, SessionMeta, TranscriptRecord},
 };
+
+struct BoundRunValues<'a> {
+    agent_name: &'a str,
+    model: &'a str,
+    effort: crate::types::Effort,
+    cwd: &'a std::path::Path,
+    role_name: Option<&'a str>,
+}
 
 pub fn run_from_env() -> Result<(), AppError> {
     let command = cli::parse_from_env()?;
@@ -152,7 +160,7 @@ fn run_prompt(
         .effort
         .or(session_meta.effort)
         .unwrap_or(agent.def.default_effort);
-    let plan_mode = args.plan.or(session_meta.plan_enabled).unwrap_or(false);
+    let plan_mode = args.plan.unwrap_or(false);
     let effective_cwd = args
         .cwd
         .clone()
@@ -177,11 +185,13 @@ fn run_prompt(
 
     let session_dir = store.session_dir(&session_id);
     let run_id = new_id();
+    let user_records = build_user_records(&run_id, &args.prompt, stdin.as_deref())?;
     let run_dir = create_run_dir(&session_dir, &run_id)?;
     let run_context = AgentRunContext {
         session_id: session_id.clone(),
         run_id: run_id.clone(),
         run_dir: run_dir.clone(),
+        session_revision: session_meta.revision,
         model: model.clone(),
         cwd: effective_cwd.clone(),
         effort,
@@ -189,24 +199,23 @@ fn run_prompt(
         prompt_messages: prompt.messages,
         agent: agent.clone(),
         config: config.clone(),
+        session_store: store.clone(),
         api_key: resolve_api_key(&agent, &config)?,
     };
-    let result = run_agent_loop(run_context)?;
-    let final_text = result.final_text.clone();
-    let user_records = build_user_records(&run_id, &args.prompt, stdin.as_deref())?;
-    let commit = build_commit(
-        &session_meta,
-        &run_id,
+    let RunOutcome {
         result,
-        user_records,
-        &agent_name,
-        &model,
+        execution_guard,
+    } = run_agent_loop(run_context)?;
+    let final_text = result.final_text.clone();
+    let bound_values = BoundRunValues {
+        agent_name: &agent_name,
+        model: &model,
         effort,
-        &effective_cwd,
-        plan_mode,
-        role_name.as_deref(),
-    );
-    store.append_run(&session_id, commit)?;
+        cwd: &effective_cwd,
+        role_name: role_name.as_deref(),
+    };
+    let commit = build_commit(&session_meta, result, user_records, &bound_values);
+    store.append_run(&session_id, commit, execution_guard.as_ref())?;
 
     if args.verbose || args.debug {
         stderr.push(format!(
@@ -229,15 +238,9 @@ fn run_prompt(
 
 fn build_commit(
     session_meta: &SessionMeta,
-    _run_id: &str,
     mut result: RunResult,
     mut user_records: Vec<TranscriptRecord>,
-    agent_name: &str,
-    model: &str,
-    effort: crate::types::Effort,
-    cwd: &std::path::Path,
-    plan_mode: bool,
-    role_name: Option<&str>,
+    bound_values: &BoundRunValues<'_>,
 ) -> SessionCommit {
     user_records.append(&mut result.records);
     let records = user_records;
@@ -249,18 +252,20 @@ fn build_commit(
         bind_agent_name: session_meta
             .agent_name
             .is_none()
-            .then(|| agent_name.to_string()),
-        bind_model: session_meta.model.is_none().then(|| model.to_string()),
-        bind_effort: session_meta.effort.is_none().then_some(effort),
+            .then(|| bound_values.agent_name.to_string()),
+        bind_model: session_meta
+            .model
+            .is_none()
+            .then(|| bound_values.model.to_string()),
+        bind_effort: session_meta.effort.is_none().then_some(bound_values.effort),
         bind_cwd: session_meta
             .cwd
             .is_none()
-            .then(|| cwd.display().to_string()),
-        bind_plan_enabled: session_meta.plan_enabled.is_none().then_some(plan_mode),
+            .then(|| bound_values.cwd.display().to_string()),
         bind_initial_role: session_meta
             .initial_role
             .is_none()
-            .then(|| role_name.map(ToOwned::to_owned))
+            .then(|| bound_values.role_name.map(ToOwned::to_owned))
             .flatten(),
     }
 }
@@ -300,34 +305,32 @@ fn build_user_records(
 }
 
 fn resolve_api_key(agent: &LoadedAgent, config: &GlobalConfig) -> Result<String, AppError> {
-    if let Some(api_key) = &agent.def.api_key {
-        if !api_key.is_empty() {
-            return Ok(api_key.clone());
-        }
+    if let Some(api_key) = &agent.def.api_key
+        && !api_key.is_empty()
+    {
+        return Ok(api_key.clone());
     }
-    if let Some(env_name) = &agent.def.api_key_env {
-        if let Ok(api_key) = env::var(env_name) {
-            if !api_key.is_empty() {
-                return Ok(api_key);
-            }
-        }
+    if let Some(env_name) = &agent.def.api_key_env
+        && let Ok(api_key) = env::var(env_name)
+        && !api_key.is_empty()
+    {
+        return Ok(api_key);
     }
-    if let Some(api_key) = &config.api_key {
-        if !api_key.is_empty() {
-            return Ok(api_key.clone());
-        }
+    if let Some(api_key) = &config.api_key
+        && !api_key.is_empty()
+    {
+        return Ok(api_key.clone());
     }
-    if let Some(env_name) = &config.api_key_env {
-        if let Ok(api_key) = env::var(env_name) {
-            if !api_key.is_empty() {
-                return Ok(api_key);
-            }
-        }
+    if let Some(env_name) = &config.api_key_env
+        && let Ok(api_key) = env::var(env_name)
+        && !api_key.is_empty()
+    {
+        return Ok(api_key);
     }
-    if let Ok(api_key) = env::var("OPENROUTER_API_KEY") {
-        if !api_key.is_empty() {
-            return Ok(api_key);
-        }
+    if let Ok(api_key) = env::var("OPENROUTER_API_KEY")
+        && !api_key.is_empty()
+    {
+        return Ok(api_key);
     }
     Err(AppError::Config(
         "missing OpenRouter API key; set it in the agent file, config.toml, or OPENROUTER_API_KEY"

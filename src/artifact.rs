@@ -21,7 +21,7 @@ pub fn store_text_artifact(
     catastrophic_output_bytes: usize,
     content_kind: Option<&str>,
 ) -> Result<StoredText, AppError> {
-    let bytes = content.as_bytes().len();
+    let bytes = content.len();
     let preview = preview_text(content, preview_bytes);
     if bytes <= preview_bytes {
         return Ok(StoredText {
@@ -66,7 +66,7 @@ pub fn create_run_dir(session_dir: &Path, run_id: &str) -> Result<PathBuf, AppEr
 }
 
 fn preview_text(content: &str, limit: usize) -> String {
-    if content.as_bytes().len() <= limit {
+    if content.len() <= limit {
         return content.to_string();
     }
     let mut end = limit.min(content.len());
@@ -76,6 +76,6 @@ fn preview_text(content: &str, limit: usize) -> String {
     format!(
         "{}\n...[truncated {} bytes]",
         &content[..end],
-        content.as_bytes().len().saturating_sub(end)
+        content.len().saturating_sub(end)
     )
 }

@@ -43,11 +43,13 @@ Root resolution
 
 Session identity
 - a session is bound to a single `agent_name` on the first successful prompt run
-- later runs may override `--model`, `--effort`, `--cwd`, and `--plan` without mutating stored sticky defaults
+- later runs may override `--model`, `--effort`, and `--cwd` without mutating stored sticky defaults
+- `--plan` is per-run only and is never stored in session metadata
 
 Concurrency
 - do not hold the session lock across the provider call
 - preserve optimistic concurrency with revision checks at append time
+- mutating tools must acquire the separate execution lock before side effects and hold it through append
 
 Plan mode
 - in the first pass, all tools are non-executing in `--plan`
@@ -107,12 +109,13 @@ If you add a new tool:
 If you change session persistence:
 - preserve inspectable on-disk state
 - keep JSONL append behavior straightforward
-- add coverage for conflicts and metadata updates
+- add coverage for conflicts, execution-lock behavior, and metadata updates
 
 If you change provider behavior:
 - keep the implementation direct
 - prefer shaping around real OpenRouter API behavior rather than inventing internal provider abstractions
 - add request-shape tests
+- preserve total-run timeout behavior across provider and tool execution
 
 ## Current Gaps To Respect
 

@@ -24,8 +24,9 @@ For a prompt run, the flow is:
 4. Resolve the effective agent and optional role via [src/agent_def.rs](/Users/ysera/headless-agent/src/agent_def.rs) and [src/role_def.rs](/Users/ysera/headless-agent/src/role_def.rs).
 5. Read stdin if present, load prior messages, and assemble provider messages in [src/prompt.rs](/Users/ysera/headless-agent/src/prompt.rs).
 6. Create a per-run directory under the session and execute the assistant/tool loop in [src/agent/loop.rs](/Users/ysera/headless-agent/src/agent/loop.rs).
-7. Re-acquire the session lock, verify the stored revision did not change, append JSONL records, and update `meta.json`.
-8. Print only the final assistant text to stdout.
+7. If the run reaches a mutating tool, acquire the session execution lock before side effects and hold it through append.
+8. Re-acquire the session lock, verify the stored revision did not change, append JSONL records, and update `meta.json`.
+9. Print only the final assistant text to stdout.
 
 Non-run commands such as `version`, `agent list`, `role list`, and `session show` stop earlier and do not enter the provider loop.
 
@@ -77,9 +78,10 @@ Current on-disk layout:
 Important behavior:
 - session ids and run ids are lowercase ULIDs
 - `headless session new` creates the session directory immediately
-- new sessions start unbound, with `agent_name`, `model`, `effort`, `cwd`, `plan_enabled`, and `initial_role` set to `null`
-- the first successful prompt run binds the session to an `agent_name` and stores sticky defaults for `model`, `effort`, `cwd`, `plan_enabled`, and `initial_role`
-- later runs may override `--model`, `--effort`, `--cwd`, and `--plan` per invocation without mutating those stored defaults
+- new sessions start unbound, with `agent_name`, `model`, `effort`, `cwd`, and `initial_role` set to `null`
+- the first successful prompt run binds the session to an `agent_name` and stores sticky defaults for `model`, `effort`, `cwd`, and `initial_role`
+- later runs may override `--model`, `--effort`, and `--cwd` per invocation without mutating those stored defaults
+- `--plan` is per-invocation only and is not stored in `meta.json`
 - `session stop` marks the session as stopped and blocks later appends
 
 ## Optimistic Concurrency
@@ -94,6 +96,13 @@ Instead:
 4. if `revision` changed, the run fails with the session-conflict exit code
 
 This keeps different sessions fully parallel while making same-session conflicts explicit and inspectable.
+
+Mutating tools add one more guardrail:
+
+1. the runtime acquires a separate session execution lock immediately before the first mutating tool
+2. it re-validates `revision` under that lock before any side effects
+3. it holds that execution lock through transcript append
+4. same-session runs that cannot acquire the execution lock fail fast with the session-conflict exit code
 
 ## Prompt Assembly
 
@@ -117,8 +126,9 @@ First-pass limitations:
 The provider loop in [src/agent/loop.rs](/Users/ysera/headless-agent/src/agent/loop.rs) uses:
 - OpenRouter only
 - a hard step cap of `24`
-- a per-tool retry cap of `2`
+- a per-tool retry cap of `2` for read-only tools only
 - `parallel_tool_calls = false`
+- a total run deadline derived from the agent timeout
 
 Loop behavior:
 - send the current conversation plus built-in tool definitions
@@ -144,6 +154,8 @@ Tool properties:
 - return deterministic JSON payloads
 - persist their payloads through the artifact layer
 - in `--plan` mode, all tools become non-executing and return planned-action payloads
+- `read_file`, `glob`, and `grep` are retried on ordinary tool errors; mutating tools are single-attempt
+- `bash` is treated as mutating and is killed on timeout, including its subprocess group
 
 ## Artifacts
 
