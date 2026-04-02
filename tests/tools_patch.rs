@@ -151,6 +151,96 @@ fn delete_file_operation_removes_target() {
     assert!(!cwd.join("doomed.txt").exists());
 }
 
+#[test]
+fn commit_failure_restores_overwritten_files() {
+    let temp = TempDir::new().expect("tempdir");
+    let cwd = temp.path();
+    let run_dir = cwd.join("run");
+    fs::create_dir_all(&run_dir).expect("run dir");
+    fs::write(cwd.join("existing.txt"), "before\n").expect("existing file");
+
+    let config = test_config(cwd);
+    let run_control = new_run_control(&config, Duration::from_secs(5));
+    let context = ToolContext::new(
+        cwd,
+        &run_dir,
+        &config,
+        false,
+        &config.shell,
+        &config.shell_args,
+        &run_control,
+    );
+    let patch = "\
+*** Begin Patch
+*** Update File: existing.txt
+@@
+-before
++after
+*** Add File: conflict
++file placeholder
+*** Add File: conflict/child.txt
++child
+*** End Patch";
+
+    let error = execute_tool(
+        &context,
+        &["apply_patch".to_string()],
+        "apply_patch",
+        &json!({ "patch": patch }),
+    )
+    .expect_err("commit should fail");
+    assert!(matches!(error, AppError::Tool(_)));
+    assert_eq!(
+        fs::read_to_string(cwd.join("existing.txt")).expect("restored file"),
+        "before\n"
+    );
+    assert!(!cwd.join("conflict").exists());
+}
+
+#[test]
+fn commit_failure_restores_move_sources() {
+    let temp = TempDir::new().expect("tempdir");
+    let cwd = temp.path();
+    let run_dir = cwd.join("run");
+    fs::create_dir_all(&run_dir).expect("run dir");
+    fs::write(cwd.join("move_me.txt"), "hello\n").expect("move source");
+
+    let config = test_config(cwd);
+    let run_control = new_run_control(&config, Duration::from_secs(5));
+    let context = ToolContext::new(
+        cwd,
+        &run_dir,
+        &config,
+        false,
+        &config.shell,
+        &config.shell_args,
+        &run_control,
+    );
+    let patch = "\
+*** Begin Patch
+*** Update File: move_me.txt
+*** Move to: conflict/move_me.txt
+@@
+ hello
+*** Add File: conflict
++file placeholder
+*** End Patch";
+
+    let error = execute_tool(
+        &context,
+        &["apply_patch".to_string()],
+        "apply_patch",
+        &json!({ "patch": patch }),
+    )
+    .expect_err("commit should fail");
+    assert!(matches!(error, AppError::Tool(_)));
+    assert_eq!(
+        fs::read_to_string(cwd.join("move_me.txt")).expect("restored move source"),
+        "hello\n"
+    );
+    assert!(!cwd.join("conflict").exists());
+}
+
 fn test_config(cwd: &std::path::Path) -> GlobalConfig {
     GlobalConfig {
         sessions_dir: cwd.join("sessions"),
@@ -159,7 +249,6 @@ fn test_config(cwd: &std::path::Path) -> GlobalConfig {
         max_stdin_bytes: 1024,
         artifact_preview_bytes: 256,
         catastrophic_output_bytes: 4096,
-        log_level: "error".to_string(),
         api_key: None,
         api_key_env: None,
         source_path: None,

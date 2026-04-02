@@ -5,6 +5,8 @@ use std::{
 };
 
 use serde_json::{Value, json};
+use tempfile::NamedTempFile;
+use ulid::Ulid;
 
 use crate::{
     error::AppError,
@@ -63,8 +65,20 @@ struct PatchHunk {
 #[derive(Debug)]
 struct ExecutionPlan {
     writes: Vec<(PathBuf, String)>,
-    deletes: Vec<PathBuf>,
+    backup_targets: Vec<PathBuf>,
     changed: Vec<String>,
+}
+
+#[derive(Debug)]
+struct StagedWrite {
+    temp: NamedTempFile,
+    final_path: PathBuf,
+}
+
+#[derive(Debug)]
+struct BackupEntry {
+    original_path: PathBuf,
+    backup_path: PathBuf,
 }
 
 fn parse_patch(input: &str) -> Result<Vec<PatchOp>, AppError> {
@@ -191,7 +205,7 @@ fn build_execution_plan(
     operations: Vec<PatchOp>,
 ) -> Result<ExecutionPlan, AppError> {
     let mut writes = Vec::new();
-    let mut deletes = Vec::new();
+    let mut backup_targets = Vec::new();
     let mut changed = Vec::new();
     let mut touched_paths = HashSet::new();
 
@@ -224,7 +238,7 @@ fn build_execution_plan(
                     )));
                 }
                 changed.push(path.display().to_string());
-                deletes.push(path);
+                backup_targets.push(path);
             }
             PatchOp::Update {
                 path,
@@ -256,10 +270,11 @@ fn build_execution_plan(
                         final_path.display()
                     ));
                     writes.push((final_path, updated));
-                    deletes.push(source_path);
+                    backup_targets.push(source_path);
                 } else {
                     changed.push(source_path.display().to_string());
-                    writes.push((source_path, updated));
+                    writes.push((source_path.clone(), updated));
+                    backup_targets.push(source_path);
                 }
             }
         }
@@ -267,61 +282,178 @@ fn build_execution_plan(
 
     Ok(ExecutionPlan {
         writes,
-        deletes,
+        backup_targets,
         changed,
     })
 }
 
 fn commit_execution_plan(context: &ToolContext<'_>, plan: &ExecutionPlan) -> Result<(), AppError> {
-    // Phase 1: Write all content to temporary files (same directory for atomic rename)
-    let mut temp_files: Vec<(PathBuf, PathBuf)> = Vec::new();
+    // Phase 1: Stage content into random-named temp files in the destination directories.
+    let mut created_dirs = Vec::new();
+    let mut created_dir_set = HashSet::new();
+    let mut staged_writes = Vec::new();
+    let mut stage_error = None;
     for (path, content) in &plan.writes {
         let _ = context.remaining_budget()?;
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
+        let parent = path.parent().unwrap_or(Path::new("."));
+        if let Err(err) = ensure_parent_dirs(parent, &mut created_dirs, &mut created_dir_set) {
+            stage_error = Some(err);
+            break;
         }
-        let temp_path = temp_path_for(path);
-        if let Err(err) = fs::write(&temp_path, content) {
-            cleanup_temps(&temp_files);
-            return Err(err.into());
+        let mut temp = match tempfile::Builder::new()
+            .prefix(".headless_")
+            .tempfile_in(parent)
+        {
+            Ok(temp) => temp,
+            Err(err) => {
+                stage_error = Some(AppError::Tool(format!(
+                    "failed to create temp file in {}: {err}",
+                    parent.display()
+                )));
+                break;
+            }
+        };
+        if let Err(err) = std::io::Write::write_all(&mut temp, content.as_bytes()) {
+            stage_error = Some(err.into());
+            break;
         }
-        temp_files.push((temp_path, path.clone()));
+        staged_writes.push(StagedWrite {
+            temp,
+            final_path: path.clone(),
+        });
+    }
+    if let Some(error) = stage_error {
+        drop(staged_writes);
+        cleanup_created_dirs(&created_dirs);
+        return Err(error);
     }
 
-    // Phase 2: Rename all temp files to final paths (atomic per file on same fs)
-    for (temp_path, final_path) in &temp_files {
-        if let Err(err) = fs::rename(temp_path, final_path) {
-            cleanup_temps(&temp_files);
+    // Phase 2: Move original files out of the way so writes/deletes can be rolled back.
+    let mut backups = Vec::new();
+    for path in &plan.backup_targets {
+        let _ = context.remaining_budget()?;
+        let backup_path = unique_backup_path(path)?;
+        if let Err(err) = fs::rename(path, &backup_path) {
+            drop(staged_writes);
+            rollback_transaction(&[], &backups);
+            cleanup_created_dirs(&created_dirs);
             return Err(AppError::Tool(format!(
-                "failed to commit patch to {}: {err}",
-                final_path.display()
+                "failed to back up patch target {}: {err}",
+                path.display()
             )));
         }
+        backups.push(BackupEntry {
+            original_path: path.clone(),
+            backup_path,
+        });
     }
 
-    // Phase 3: Process deletes
-    for path in &plan.deletes {
+    // Phase 3: Rename staged temp files into place.
+    let mut persisted_paths = Vec::new();
+    let mut persist_error = None;
+    for staged in staged_writes {
         let _ = context.remaining_budget()?;
-        if path.exists() {
-            fs::remove_file(path)?;
+        let final_path = staged.final_path;
+        match staged.temp.persist(&final_path) {
+            Ok(_) => persisted_paths.push(final_path),
+            Err(err) => {
+                persist_error = Some((final_path, err.error));
+                break;
+            }
+        }
+    }
+    if let Some((final_path, err)) = persist_error {
+        rollback_transaction(&persisted_paths, &backups);
+        cleanup_created_dirs(&created_dirs);
+        return Err(AppError::Tool(format!(
+            "failed to commit patch to {}: {err}",
+            final_path.display()
+        )));
+    }
+
+    // Phase 4: Finalize deletes by dropping their backups.
+    for backup in &backups {
+        let _ = context.remaining_budget()?;
+        if let Err(err) = remove_path_if_exists(&backup.backup_path) {
+            eprintln!(
+                "warning: failed to remove patch backup {}: {err}",
+                backup.backup_path.display()
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn ensure_parent_dirs(
+    parent: &Path,
+    created_dirs: &mut Vec<PathBuf>,
+    created_dir_set: &mut HashSet<PathBuf>,
+) -> Result<(), AppError> {
+    let mut missing = Vec::new();
+    let mut cursor = parent;
+    while !cursor.exists() {
+        missing.push(cursor.to_path_buf());
+        let Some(next) = cursor.parent() else {
+            break;
+        };
+        cursor = next;
+    }
+    if missing.is_empty() {
+        return Ok(());
+    }
+    fs::create_dir_all(parent)?;
+    missing.reverse();
+    for dir in missing {
+        if created_dir_set.insert(dir.clone()) {
+            created_dirs.push(dir);
         }
     }
     Ok(())
 }
 
-fn temp_path_for(path: &Path) -> PathBuf {
-    let mut name = path
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_string();
-    name.push_str(".headless_tmp");
-    path.with_file_name(name)
+fn unique_backup_path(path: &Path) -> Result<PathBuf, AppError> {
+    let parent = path.parent().unwrap_or(Path::new("."));
+    for _ in 0..16 {
+        let candidate = parent.join(format!(".headless_backup_{}", Ulid::new()));
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+    Err(AppError::Tool(format!(
+        "failed to allocate backup path for {}",
+        path.display()
+    )))
 }
 
-fn cleanup_temps(temp_files: &[(PathBuf, PathBuf)]) {
-    for (temp, _) in temp_files {
-        let _ = fs::remove_file(temp);
+fn rollback_transaction(final_paths: &[PathBuf], backups: &[BackupEntry]) {
+    for path in final_paths.iter().rev() {
+        let _ = remove_path_if_exists(path);
+    }
+    for backup in backups.iter().rev() {
+        let _ = remove_path_if_exists(&backup.original_path);
+        let _ = fs::rename(&backup.backup_path, &backup.original_path);
+    }
+}
+
+fn cleanup_created_dirs(created_dirs: &[PathBuf]) {
+    for dir in created_dirs.iter().rev() {
+        let _ = fs::remove_dir(dir);
+    }
+}
+
+fn remove_path_if_exists(path: &Path) -> Result<(), AppError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() => {
+            fs::remove_dir(path)?;
+            Ok(())
+        }
+        Ok(_) => {
+            fs::remove_file(path)?;
+            Ok(())
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err.into()),
     }
 }
 

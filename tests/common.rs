@@ -140,7 +140,6 @@ shell_args = ["-lc"]
 max_stdin_bytes = 1048576
 artifact_preview_bytes = 256
 catastrophic_output_bytes = 65536
-log_level = "error"
 api_key_env = "OPENROUTER_API_KEY"
 "#,
                 self.sessions_dir.display()

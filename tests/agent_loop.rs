@@ -120,6 +120,110 @@ fn end_to_end_loop_can_write_read_and_shell_out() {
 }
 
 #[test]
+fn stopped_session_allows_in_flight_mutating_run_to_finish() {
+    let server = FakeOpenRouter::start(vec![
+        ResponseSpec::json(json!({
+            "choices": [{
+                "message": {
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "function": {
+                            "name": "write_file",
+                            "arguments": "{\"path\":\"note.txt\",\"content\":\"persisted\"}"
+                        }
+                    }]
+                }
+            }]
+        })),
+        ResponseSpec::delayed_json(
+            json!({
+                "choices": [{
+                    "message": {
+                        "content": "done after stop"
+                    }
+                }]
+            }),
+            500,
+        ),
+    ]);
+    let workspace = TestWorkspace::new();
+    workspace.write_repo_assets(&server.url());
+
+    let created = workspace
+        .command()
+        .args(["session", "new"])
+        .output()
+        .expect("session new");
+    let session_id = String::from_utf8(created.stdout)
+        .expect("stdout")
+        .trim()
+        .to_string();
+
+    let mut run = workspace.std_command();
+    run.args([
+        "--session",
+        &session_id,
+        "--agent",
+        "coder",
+        "--cwd",
+        workspace.worktree.to_str().expect("cwd"),
+        "finish after stop",
+    ]);
+    let handle = thread::spawn(move || run.output().expect("run output"));
+
+    for _ in 0..20 {
+        if workspace.worktree.join("note.txt").exists() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        workspace.worktree.join("note.txt").exists(),
+        "mutating tool should finish before session stop"
+    );
+
+    workspace
+        .command()
+        .args(["session", "stop", &session_id])
+        .assert()
+        .success();
+
+    let output = handle.join().expect("join run");
+    assert!(output.status.success());
+    assert_eq!(
+        fs::read_to_string(workspace.worktree.join("note.txt")).expect("note"),
+        "persisted"
+    );
+
+    let messages = fs::read_to_string(
+        workspace
+            .sessions_dir
+            .join(&session_id)
+            .join("messages.jsonl"),
+    )
+    .expect("messages");
+    let session_records: Vec<Value> = messages
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("message json"))
+        .collect();
+    assert_eq!(session_records.len(), 2);
+    assert_eq!(session_records[1]["content"], "done after stop");
+
+    let blocked = workspace
+        .command()
+        .args(["--session", &session_id, "--agent", "coder", "should fail"])
+        .output()
+        .expect("blocked run");
+    assert_eq!(blocked.status.code(), Some(4));
+    assert!(
+        String::from_utf8(blocked.stderr)
+            .expect("stderr")
+            .contains("stopped")
+    );
+}
+
+#[test]
 fn same_session_conflict_allows_only_one_mutating_run_to_change_the_worktree() {
     let server = FakeOpenRouter::start(vec![
         ResponseSpec::delayed_json(
@@ -486,11 +590,8 @@ fn token_usage_is_parsed_from_provider_response() {
             "total_tokens": 52
         }
     }))]);
-    let client = headless::provider::openrouter::OpenRouterClient::new(
-        server.url(),
-        "test-key".to_string(),
-        Duration::from_secs(5),
-    );
+    let client =
+        headless::provider::openrouter::OpenRouterClient::new(server.url(), "test-key".to_string());
     let response = client
         .send_chat(headless::provider::openrouter::ChatRequest {
             session_id: "s1",
@@ -505,6 +606,7 @@ fn token_usage_is_parsed_from_provider_response() {
             }],
             tools: &[],
             max_output_tokens: 128,
+            timeout: Duration::from_secs(5),
         })
         .expect("response");
 

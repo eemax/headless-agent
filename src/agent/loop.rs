@@ -46,7 +46,7 @@ pub fn run_agent_loop(context: AgentRunContext) -> Result<RunOutcome, AppError> 
         .unwrap_or_else(|| "https://openrouter.ai/api/v1".to_string());
     let timeout = Duration::from_secs(context.agent.timeout_seconds()?);
     let max_output_tokens = context.agent.def.max_output_tokens.unwrap_or(12_000);
-    let client = OpenRouterClient::new(base_url, context.api_key.clone(), timeout);
+    let client = OpenRouterClient::new(base_url, context.api_key.clone());
     let tool_specs = builtin_specs(&context.agent.def.enabled_tools);
     let run_control = RunControl::new(
         context.session_store.clone(),
@@ -71,16 +71,19 @@ pub fn run_agent_loop(context: AgentRunContext) -> Result<RunOutcome, AppError> 
     let mut total_completion_tokens: usize = 0;
 
     for _step in 0..STEP_CAP {
-        if let Err(err) = run_control.remaining_budget() {
-            return Ok(partial_outcome(
-                records,
-                artifacts,
-                LoopTermination::Timeout(err.to_string()),
-                run_control,
-                total_prompt_tokens,
-                total_completion_tokens,
-            ));
-        }
+        let request_timeout = match run_control.remaining_budget() {
+            Ok(timeout) => timeout,
+            Err(err) => {
+                return Ok(partial_outcome(
+                    records,
+                    artifacts,
+                    LoopTermination::Timeout(err.to_string()),
+                    run_control,
+                    total_prompt_tokens,
+                    total_completion_tokens,
+                ));
+            }
+        };
         let response = match client.send_chat(ChatRequest {
             session_id: &context.session_id,
             model: &context.model,
@@ -88,6 +91,7 @@ pub fn run_agent_loop(context: AgentRunContext) -> Result<RunOutcome, AppError> 
             messages: &prompt_messages,
             tools: &tool_specs,
             max_output_tokens,
+            timeout: request_timeout,
         }) {
             Ok(response) => response,
             Err(AppError::Timeout(msg)) => {

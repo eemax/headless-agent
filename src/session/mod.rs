@@ -125,8 +125,9 @@ impl SessionStore {
             .open(&lock_path)?;
         lock.lock_exclusive()?;
         let mut meta = self.load_meta(session_id)?;
-        meta.stopped_at = Some(now_rfc3339()?);
-        meta.updated_at = meta.stopped_at.clone().unwrap_or_default();
+        let now = now_rfc3339()?;
+        meta.stopped_at = Some(now.clone());
+        meta.updated_at = now;
         self.write_meta(&meta)?;
         lock.unlock()?;
         Ok(meta)
@@ -154,12 +155,6 @@ impl SessionStore {
             lock.unlock()?;
             return Err(AppError::SessionConflict(format!(
                 "session `{session_id}` was updated concurrently"
-            )));
-        }
-        if meta.stopped_at.is_some() {
-            lock.unlock()?;
-            return Err(AppError::Session(format!(
-                "session `{session_id}` has been stopped and cannot accept new runs"
             )));
         }
         jsonl::append_records(

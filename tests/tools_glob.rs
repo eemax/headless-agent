@@ -92,7 +92,6 @@ fn test_config(cwd: &std::path::Path) -> GlobalConfig {
         max_stdin_bytes: 1024,
         artifact_preview_bytes: 256,
         catastrophic_output_bytes: 4096,
-        log_level: "error".to_string(),
         api_key: None,
         api_key_env: None,
         source_path: None,

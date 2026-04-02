@@ -9,11 +9,12 @@ use crate::{
     types::{Effort, MessageRole, PromptMessage, ToolCallRecord},
 };
 
+const CONNECT_TIMEOUT_CAP: Duration = Duration::from_secs(30);
+
 #[derive(Debug)]
 pub struct OpenRouterClient {
     base_url: String,
     api_key: String,
-    agent: ureq::Agent,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -40,20 +41,12 @@ pub struct ChatRequest<'a> {
     pub messages: &'a [PromptMessage],
     pub tools: &'a [ToolSpec],
     pub max_output_tokens: usize,
+    pub timeout: Duration,
 }
 
 impl OpenRouterClient {
-    pub fn new(base_url: String, api_key: String, timeout: Duration) -> Self {
-        let agent = ureq::AgentBuilder::new()
-            .timeout_connect(Duration::from_secs(30))
-            .timeout_read(timeout)
-            .timeout_write(Duration::from_secs(30))
-            .build();
-        Self {
-            base_url,
-            api_key,
-            agent,
-        }
+    pub fn new(base_url: String, api_key: String) -> Self {
+        Self { base_url, api_key }
     }
 
     pub fn send_chat(&self, request: ChatRequest<'_>) -> Result<ProviderResponse, AppError> {
@@ -66,65 +59,87 @@ impl OpenRouterClient {
             request.tools,
             request.max_output_tokens,
         );
+        send_chat_blocking(url, self.api_key.clone(), payload, request.timeout)
+    }
+}
 
-        let response = self
-            .agent
-            .post(&url)
-            .set("Authorization", &format!("Bearer {}", self.api_key))
-            .set("Content-Type", "application/json")
-            .send_json(payload);
+fn send_chat_blocking(
+    url: String,
+    api_key: String,
+    payload: Value,
+    timeout: Duration,
+) -> Result<ProviderResponse, AppError> {
+    let connect_timeout = CONNECT_TIMEOUT_CAP.min(timeout);
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(connect_timeout)
+        .timeout(timeout)
+        .timeout_read(timeout)
+        .timeout_write(timeout)
+        .build();
 
-        let response = match response {
-            Ok(response) => response,
-            Err(ureq::Error::Status(code, response)) => {
-                let body = response.into_string().unwrap_or_default();
-                let message = extract_error_message(&body)
-                    .unwrap_or_else(|| format!("OpenRouter returned HTTP {code}"));
-                return if code == 408 {
-                    Err(AppError::Timeout(message))
-                } else {
-                    Err(AppError::Provider(message))
-                };
-            }
-            Err(ureq::Error::Transport(error)) => {
-                if error.to_string().to_lowercase().contains("timed out") {
-                    return Err(AppError::Timeout(format!(
-                        "OpenRouter request timed out: {error}"
-                    )));
-                }
-                return Err(AppError::Provider(format!(
-                    "failed to reach OpenRouter: {error}"
+    let response = agent
+        .post(&url)
+        .set("Authorization", &format!("Bearer {}", api_key))
+        .set("Content-Type", "application/json")
+        .send_json(payload);
+
+    let response = match response {
+        Ok(response) => response,
+        Err(ureq::Error::Status(code, response)) => {
+            let body = response.into_string().unwrap_or_default();
+            let message = extract_error_message(&body)
+                .unwrap_or_else(|| format!("OpenRouter returned HTTP {code}"));
+            return if code == 408 {
+                Err(AppError::Timeout(message))
+            } else {
+                Err(AppError::Provider(message))
+            };
+        }
+        Err(ureq::Error::Transport(error)) => {
+            if error.to_string().to_lowercase().contains("timed out") {
+                return Err(AppError::Timeout(format!(
+                    "OpenRouter request timed out: {error}"
                 )));
             }
-        };
+            return Err(AppError::Provider(format!(
+                "failed to reach OpenRouter: {error}"
+            )));
+        }
+    };
 
-        let parsed: ChatResponse = response.into_json().map_err(|err| {
-            AppError::Provider(format!("failed to decode OpenRouter response: {err}"))
-        })?;
-        let choice = parsed.choices.into_iter().next().ok_or_else(|| {
-            AppError::Provider("OpenRouter response did not contain any choices".to_string())
-        })?;
+    let parsed: ChatResponse = response.into_json().map_err(|err| {
+        AppError::Provider(format!("failed to decode OpenRouter response: {err}"))
+    })?;
+    let choice = parsed.choices.into_iter().next().ok_or_else(|| {
+        AppError::Provider("OpenRouter response did not contain any choices".to_string())
+    })?;
 
-        let content = flatten_content(choice.message.content);
-        let tool_calls = choice
-            .message
-            .tool_calls
-            .unwrap_or_default()
-            .into_iter()
-            .map(|tool_call| ToolCallRecord {
+    let content = flatten_content(choice.message.content);
+    let tool_calls = choice
+        .message
+        .tool_calls
+        .unwrap_or_default()
+        .into_iter()
+        .map(|tool_call| {
+            let fn_name = tool_call.function.name;
+            let raw_args = tool_call.function.arguments;
+            let arguments = serde_json::from_str(&raw_args).unwrap_or_else(|err| {
+                eprintln!("warning: malformed tool arguments for `{fn_name}`: {err}");
+                Value::String(raw_args)
+            });
+            ToolCallRecord {
                 id: tool_call.id,
-                name: tool_call.function.name,
-                arguments: serde_json::from_str(&tool_call.function.arguments)
-                    .unwrap_or(Value::String(tool_call.function.arguments)),
-            })
-            .collect();
-
-        Ok(ProviderResponse {
-            content,
-            tool_calls,
-            usage: parsed.usage,
+                name: fn_name,
+                arguments,
+            }
         })
-    }
+        .collect();
+
+    Ok(ProviderResponse {
+        content,
+        tool_calls,
+        usage: parsed.usage,
+    })
 }
 
 fn build_payload(

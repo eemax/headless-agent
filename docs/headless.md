@@ -39,7 +39,6 @@ shell_args = ["-lc"]
 max_stdin_bytes = 1048576
 artifact_preview_bytes = 16384
 catastrophic_output_bytes = 16777216
-log_level = "error"
 api_key_env = "OPENROUTER_API_KEY"
 ```
 
@@ -75,12 +74,6 @@ api_key_env = "OPENROUTER_API_KEY"
 - Type: integer
 - Default: `16777216`
 - Purpose: emergency threshold for very large output; beyond this, inline assistant text is replaced with an artifact reference string
-
-`log_level`
-- Type: string
-- Default: `"error"`
-- Purpose: reserved for logging defaults
-- Current status: parsed and stored, but not yet used to drive a logger
 
 `api_key`
 - Type: string

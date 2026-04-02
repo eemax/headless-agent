@@ -23,8 +23,7 @@ fn openrouter_request_includes_reasoning_and_tool_definitions() {
             }
         ]
     }))]);
-    let client =
-        OpenRouterClient::new(server.url(), "test-key".to_string(), Duration::from_secs(5));
+    let client = OpenRouterClient::new(server.url(), "test-key".to_string());
     let response = client
         .send_chat(ChatRequest {
             session_id: "session-1",
@@ -48,6 +47,7 @@ fn openrouter_request_includes_reasoning_and_tool_definitions() {
             ],
             tools: &[bash_spec()],
             max_output_tokens: 1234,
+            timeout: Duration::from_secs(5),
         })
         .expect("provider response");
 
@@ -73,8 +73,7 @@ fn openrouter_maps_timeout_status_to_timeout_errors() {
         }),
         delay_ms: 0,
     }]);
-    let client =
-        OpenRouterClient::new(server.url(), "test-key".to_string(), Duration::from_secs(5));
+    let client = OpenRouterClient::new(server.url(), "test-key".to_string());
     let error = client
         .send_chat(ChatRequest {
             session_id: "session-1",
@@ -89,6 +88,7 @@ fn openrouter_maps_timeout_status_to_timeout_errors() {
             }],
             tools: &[],
             max_output_tokens: 128,
+            timeout: Duration::from_secs(5),
         })
         .expect_err("expected timeout error");
 
@@ -109,8 +109,7 @@ fn non_timeout_http_error_maps_to_provider_error() {
         }),
         delay_ms: 0,
     }]);
-    let client =
-        OpenRouterClient::new(server.url(), "test-key".to_string(), Duration::from_secs(5));
+    let client = OpenRouterClient::new(server.url(), "test-key".to_string());
     let error = client
         .send_chat(ChatRequest {
             session_id: "session-1",
@@ -125,6 +124,7 @@ fn non_timeout_http_error_maps_to_provider_error() {
             }],
             tools: &[],
             max_output_tokens: 128,
+            timeout: Duration::from_secs(5),
         })
         .expect_err("expected provider error");
 
@@ -135,17 +135,53 @@ fn non_timeout_http_error_maps_to_provider_error() {
 }
 
 #[test]
+fn malformed_tool_arguments_fall_back_to_raw_string() {
+    let server = FakeOpenRouter::start(vec![ResponseSpec::json(json!({
+        "choices": [{
+            "message": {
+                "content": null,
+                "tool_calls": [{
+                    "id": "call_1",
+                    "function": {
+                        "name": "bash",
+                        "arguments": "not json"
+                    }
+                }]
+            }
+        }]
+    }))]);
+    let client = OpenRouterClient::new(server.url(), "test-key".to_string());
+    let response = client
+        .send_chat(ChatRequest {
+            session_id: "session-1",
+            model: "openai/gpt-4.1",
+            effort: Effort::Medium,
+            messages: &[PromptMessage {
+                role: MessageRole::User,
+                content: Some("hello".to_string()),
+                name: None,
+                tool_call_id: None,
+                tool_calls: Vec::new(),
+            }],
+            tools: &[bash_spec()],
+            max_output_tokens: 128,
+            timeout: Duration::from_secs(5),
+        })
+        .expect("provider response");
+
+    assert_eq!(response.tool_calls.len(), 1);
+    assert_eq!(response.tool_calls[0].name, "bash");
+    assert_eq!(response.tool_calls[0].arguments, json!("not json"));
+}
+
+#[test]
 #[ignore]
 fn openrouter_live_smoke_test() {
     let api_key = match env::var("OPENROUTER_API_KEY") {
         Ok(value) if !value.is_empty() => value,
         _ => return,
     };
-    let client = OpenRouterClient::new(
-        "https://openrouter.ai/api/v1".to_string(),
-        api_key,
-        Duration::from_secs(30),
-    );
+    let client = OpenRouterClient::new("https://openrouter.ai/api/v1".to_string(), api_key);
     let response = client
         .send_chat(ChatRequest {
             session_id: "live-smoke",
@@ -160,6 +196,7 @@ fn openrouter_live_smoke_test() {
             }],
             tools: &[],
             max_output_tokens: 32,
+            timeout: Duration::from_secs(30),
         })
         .expect("live response");
     assert!(

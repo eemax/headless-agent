@@ -24,7 +24,6 @@ struct PartialGlobalConfig {
     max_stdin_bytes: Option<usize>,
     artifact_preview_bytes: Option<usize>,
     catastrophic_output_bytes: Option<usize>,
-    log_level: Option<String>,
     api_key: Option<String>,
     api_key_env: Option<String>,
 }
@@ -37,7 +36,6 @@ pub struct GlobalConfig {
     pub max_stdin_bytes: usize,
     pub artifact_preview_bytes: usize,
     pub catastrophic_output_bytes: usize,
-    pub log_level: String,
     pub api_key: Option<String>,
     pub api_key_env: Option<String>,
     pub source_path: Option<PathBuf>,
@@ -52,7 +50,6 @@ impl Default for GlobalConfig {
             max_stdin_bytes: 1024 * 1024,
             artifact_preview_bytes: 16 * 1024,
             catastrophic_output_bytes: 16 * 1024 * 1024,
-            log_level: "error".to_string(),
             api_key: None,
             api_key_env: None,
             source_path: None,
@@ -90,9 +87,6 @@ impl GlobalConfig {
             }
             if let Some(value) = partial.catastrophic_output_bytes {
                 config.catastrophic_output_bytes = value;
-            }
-            if let Some(value) = partial.log_level {
-                config.log_level = value;
             }
             config.api_key = partial.api_key;
             config.api_key_env = partial.api_key_env;

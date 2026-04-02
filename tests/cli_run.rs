@@ -1,6 +1,10 @@
 mod common;
 
-use std::{fs, path::Path};
+use std::{
+    fs,
+    path::Path,
+    time::{Duration, Instant},
+};
 
 use serde_json::Value;
 use serde_json::json;
@@ -299,26 +303,30 @@ fn combined_tool_and_provider_time_budget_returns_timeout_exit_code() {
                     }
                 }]
             }),
-            600,
+            900,
         ),
     ]);
     let workspace = TestWorkspace::new();
     workspace.write_repo_assets_with_timeout(&server.url(), "1s");
 
-    let output = workspace
-        .command()
-        .args([
-            "--session",
-            "new",
-            "--agent",
-            "coder",
-            "--cwd",
-            workspace.worktree.to_str().expect("cwd"),
-            "mixed timeout",
-        ])
-        .output()
-        .expect("mixed timeout");
+    let mut command = workspace.std_command();
+    command.args([
+        "--session",
+        "new",
+        "--agent",
+        "coder",
+        "--cwd",
+        workspace.worktree.to_str().expect("cwd"),
+        "mixed timeout",
+    ]);
+    let started = Instant::now();
+    let output = command.output().expect("mixed timeout");
+    let elapsed = started.elapsed();
     assert_eq!(output.status.code(), Some(7));
+    assert!(
+        elapsed < Duration::from_millis(1_900),
+        "provider call should respect the remaining budget, elapsed={elapsed:?}"
+    );
 }
 
 fn path_string(path: &Path) -> String {
