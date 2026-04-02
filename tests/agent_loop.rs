@@ -91,13 +91,32 @@ fn end_to_end_loop_can_write_read_and_shell_out() {
     let messages = fs::read_to_string(
         workspace
             .sessions_dir
-            .join(session_id)
+            .join(&session_id)
             .join("messages.jsonl"),
     )
     .expect("messages");
-    assert!(messages.contains("\"name\":\"write_file\""));
-    assert!(messages.contains("\"name\":\"read_file\""));
-    assert!(messages.contains("\"name\":\"bash\""));
+    assert!(!messages.contains("\"name\":\"write_file\""));
+    assert!(!messages.contains("\"name\":\"read_file\""));
+    assert!(!messages.contains("\"name\":\"bash\""));
+
+    let session_records: Vec<Value> = messages
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("message json"))
+        .collect();
+    assert_eq!(session_records.len(), 2);
+    assert_eq!(session_records[0]["role"], "user");
+    assert_eq!(session_records[1]["role"], "assistant");
+    assert_eq!(session_records[1]["content"], "workflow complete");
+
+    let run_dir = workspace.only_run_dir(&session_id);
+    let transcript = fs::read_to_string(run_dir.join("transcript.jsonl")).expect("transcript");
+    assert!(transcript.contains("\"name\":\"write_file\""));
+    assert!(transcript.contains("\"name\":\"read_file\""));
+    assert!(transcript.contains("\"name\":\"bash\""));
+    let outcome: Value =
+        serde_json::from_str(&fs::read_to_string(run_dir.join("outcome.json")).expect("outcome"))
+            .expect("outcome json");
+    assert_eq!(outcome["termination"], "complete");
 }
 
 #[test]
@@ -283,7 +302,7 @@ fn second_mutating_run_fails_fast_while_execution_lock_is_held() {
 }
 
 #[test]
-fn timeout_after_tool_execution_still_persists_records() {
+fn timeout_after_tool_execution_writes_run_transcript_but_not_session_tool_history() {
     let server = FakeOpenRouter::start(vec![
         ResponseSpec::json(json!({
             "choices": [{
@@ -347,10 +366,19 @@ fn timeout_after_tool_execution_still_persists_records() {
             .join("messages.jsonl"),
     )
     .expect("messages");
+    assert!(!messages.contains("\"name\":\"write_file\""));
+    assert_eq!(messages.lines().count(), 1);
+
+    let run_dir = workspace.only_run_dir(&session_id);
+    let transcript = fs::read_to_string(run_dir.join("transcript.jsonl")).expect("transcript");
     assert!(
-        messages.contains("\"name\":\"write_file\""),
-        "tool execution should be recorded in JSONL despite timeout"
+        transcript.contains("\"name\":\"write_file\""),
+        "tool execution should be recorded in the run transcript despite timeout"
     );
+    let outcome: Value =
+        serde_json::from_str(&fs::read_to_string(run_dir.join("outcome.json")).expect("outcome"))
+            .expect("outcome json");
+    assert_eq!(outcome["termination"], "timeout");
 }
 
 #[test]
@@ -418,17 +446,19 @@ fn runaway_loop_persists_partial_records_on_termination() {
 
     assert!(!output.status.success());
 
-    // Records should be persisted despite the error
     let messages_path = workspace
         .sessions_dir
         .join(&session_id)
         .join("messages.jsonl");
     let messages = fs::read_to_string(&messages_path).expect("messages");
-    let line_count = messages.lines().count();
-    // At least: user + assistant(tool_call) + tool(read_file) = 3
+    assert_eq!(messages.lines().count(), 1);
+
+    let run_dir = workspace.only_run_dir(&session_id);
+    let transcript = fs::read_to_string(run_dir.join("transcript.jsonl")).expect("transcript");
+    let line_count = transcript.lines().count();
     assert!(
         line_count >= 3,
-        "expected at least 3 persisted records, got {line_count}"
+        "expected at least 3 run transcript records, got {line_count}"
     );
 
     // Session should be bound

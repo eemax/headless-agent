@@ -14,7 +14,6 @@ use std::{
     time::Duration,
 };
 
-
 use assert_cmd::Command;
 use headless::{config::GlobalConfig, session::SessionStore, tools::RunControl};
 use serde_json::Value;
@@ -115,6 +114,17 @@ timeout = "{timeout}"
         command.env("HOME", &self.home_dir);
         command.env("OPENROUTER_API_KEY", "test-key");
         command
+    }
+
+    pub fn only_run_dir(&self, session_id: &str) -> PathBuf {
+        let runs_dir = self.sessions_dir.join(session_id).join("runs");
+        let mut entries = fs::read_dir(&runs_dir)
+            .expect("read runs dir")
+            .map(|entry| entry.expect("run entry").path())
+            .collect::<Vec<_>>();
+        entries.sort();
+        assert_eq!(entries.len(), 1, "expected exactly one run directory");
+        entries.remove(0)
     }
 
     fn write_root_assets(&self, root: &Path, base_url: &str, prompt_label: &str, timeout: &str) {

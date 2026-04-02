@@ -40,6 +40,8 @@ pub fn assemble_prompt(
         });
     }
 
+    // Session history is replay-oriented rather than audit-oriented:
+    // only persisted user prompts and completed assistant replies are sent back.
     for record in history {
         match record.role {
             MessageRole::User => {
@@ -51,9 +53,7 @@ pub fn assemble_prompt(
                     tool_calls: Vec::new(),
                 });
             }
-            MessageRole::Assistant
-                if record.tool_calls.as_ref().is_none_or(|tc| tc.is_empty()) =>
-            {
+            MessageRole::Assistant if record.tool_calls.as_ref().is_none_or(|tc| tc.is_empty()) => {
                 messages.push(PromptMessage {
                     role: record.role,
                     content: record.content_for_prompt(),

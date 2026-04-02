@@ -111,11 +111,25 @@ where
     R: Read + Send + 'static,
 {
     thread::spawn(move || {
+        let mut reader = reader;
         let mut buffer = Vec::new();
-        reader.take(limit as u64 + 1).read_to_end(&mut buffer)?;
-        let truncated = buffer.len() > limit;
-        if truncated {
-            buffer.truncate(limit);
+        let mut chunk = [0u8; 8192];
+        let mut truncated = false;
+
+        loop {
+            let read = reader.read(&mut chunk)?;
+            if read == 0 {
+                break;
+            }
+
+            let remaining = limit.saturating_sub(buffer.len());
+            let keep = remaining.min(read);
+            if keep > 0 {
+                buffer.extend_from_slice(&chunk[..keep]);
+            }
+            if read > keep {
+                truncated = true;
+            }
         }
         Ok((buffer, truncated))
     })
@@ -136,29 +150,33 @@ fn collect_reader(
 }
 
 fn kill_child(child: &mut std::process::Child, command: &str) -> Result<(), AppError> {
-    #[cfg(unix)]
-    {
-        let pid = child.id() as i32;
-        let result = unsafe { libc::kill(-pid, libc::SIGKILL) };
-        if result == 0 {
-            return Ok(());
-        }
+    let pid = child.id() as i32;
 
+    // Try graceful shutdown first
+    let term_result = unsafe { libc::kill(-pid, libc::SIGTERM) };
+    if term_result != 0 {
         let error = io::Error::last_os_error();
-        if error.kind() == io::ErrorKind::NotFound {
+        if error.raw_os_error() == Some(libc::ESRCH) {
             return Ok(());
         }
-        Err(AppError::Shell(format!(
-            "failed to kill timed out shell command `{command}`: {error}"
-        )))
+        // SIGTERM failed for non-ESRCH reason; fall through to SIGKILL
+    } else {
+        thread::sleep(Duration::from_millis(500));
+        if child.try_wait().ok().flatten().is_some() {
+            return Ok(());
+        }
     }
 
-    #[cfg(not(unix))]
-    match child.kill() {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::InvalidInput => Ok(()),
-        Err(error) => Err(AppError::Shell(format!(
-            "failed to kill timed out shell command `{command}`: {error}"
-        ))),
+    // Force kill
+    let kill_result = unsafe { libc::kill(-pid, libc::SIGKILL) };
+    if kill_result == 0 {
+        return Ok(());
     }
+    let error = io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        return Ok(());
+    }
+    Err(AppError::Shell(format!(
+        "failed to kill timed out shell command `{command}`: {error}"
+    )))
 }

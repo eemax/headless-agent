@@ -69,7 +69,7 @@ fn bash_timeout_kills_the_process_group() {
 }
 
 #[test]
-fn bash_output_is_capped_and_reports_truncation() {
+fn bash_output_is_capped_without_changing_exit_status() {
     let temp = TempDir::new().expect("tempdir");
     let cwd = temp.path();
     let run_dir = cwd.join("run");
@@ -94,7 +94,9 @@ fn bash_output_is_capped_and_reports_truncation() {
         &context,
         &["bash".to_string()],
         "bash",
-        &json!({ "command": "printf '%0.s_' $(seq 1 1000)" }),
+        &json!({
+            "command": "python3 -c \"import sys; sys.stdout.write('x' * 1000000); sys.stdout.flush()\""
+        }),
     )
     .expect("bash execution");
     assert!(
@@ -104,7 +106,10 @@ fn bash_output_is_capped_and_reports_truncation() {
     let artifact_path = run_dir.join(&execution.artifact.as_ref().unwrap().path);
     let artifact_content = fs::read_to_string(&artifact_path).expect("read artifact");
     let payload: Value = serde_json::from_str(&artifact_content).expect("parse artifact json");
+    assert_eq!(payload["ok"], true);
+    assert_eq!(payload["exit_code"], 0);
     assert_eq!(payload["stdout_truncated"], true);
+    assert_eq!(payload["stderr"], "");
     assert!(payload["note"].as_str().unwrap().contains("truncated"));
 }
 

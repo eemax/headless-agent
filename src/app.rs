@@ -1,10 +1,13 @@
 use std::{
-    env,
+    env, fs,
     io::{self, IsTerminal, Read, Write},
+    path::Path,
     path::PathBuf,
     sync::Arc,
     sync::atomic::AtomicBool,
 };
+
+use serde::Serialize;
 
 use crate::{
     agent::r#loop::{AgentRunContext, run_agent_loop},
@@ -15,8 +18,8 @@ use crate::{
     error::AppError,
     prompt::assemble_prompt,
     role_def::LoadedRole,
-    session::{SessionCommit, SessionStore, new_id, now_rfc3339},
-    types::{MessageRole, RunOutcome, RunResult, SessionMeta, TranscriptRecord},
+    session::{self, SessionCommit, SessionStore, new_id, now_rfc3339},
+    types::{LoopTermination, MessageRole, RunOutcome, RunResult, SessionMeta, TranscriptRecord},
 };
 
 struct BoundRunValues<'a> {
@@ -25,6 +28,17 @@ struct BoundRunValues<'a> {
     effort: crate::types::Effort,
     cwd: &'a std::path::Path,
     role_name: Option<&'a str>,
+}
+
+#[derive(Debug, Serialize)]
+struct PersistedRunOutcome<'a> {
+    termination: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    termination_message: Option<&'a str>,
+    final_text: &'a str,
+    total_prompt_tokens: usize,
+    total_completion_tokens: usize,
+    artifacts: &'a [crate::types::ArtifactRef],
 }
 
 pub fn run_from_env(interrupted: Arc<AtomicBool>) -> Result<(), AppError> {
@@ -219,7 +233,8 @@ fn run_prompt(
         cwd: &effective_cwd,
         role_name: role_name.as_deref(),
     };
-    let commit = build_commit(&session_meta, result, user_records, &bound_values);
+    persist_run_trace(&run_dir, &user_records, &result)?;
+    let commit = build_commit(&session_meta, &result, &user_records, &bound_values);
     store.append_run(&session_id, commit, execution_guard.as_ref())?;
 
     if let Some(err) = termination.into_error() {
@@ -247,12 +262,11 @@ fn run_prompt(
 
 fn build_commit(
     session_meta: &SessionMeta,
-    mut result: RunResult,
-    mut user_records: Vec<TranscriptRecord>,
+    result: &RunResult,
+    user_records: &[TranscriptRecord],
     bound_values: &BoundRunValues<'_>,
 ) -> SessionCommit {
-    user_records.append(&mut result.records);
-    let records = user_records;
+    let records = project_session_history(user_records, result);
     let char_count_delta = records.iter().map(|record| record.char_count()).sum();
     SessionCommit {
         expected_revision: session_meta.revision,
@@ -311,6 +325,65 @@ fn build_user_records(
         });
     }
     Ok(records)
+}
+
+fn persist_run_trace(
+    run_dir: &Path,
+    user_records: &[TranscriptRecord],
+    result: &RunResult,
+) -> Result<(), AppError> {
+    let mut records = user_records.to_vec();
+    records.extend(result.records.iter().cloned());
+    session::jsonl::append_records(&run_dir.join("transcript.jsonl"), &records)?;
+
+    let outcome = PersistedRunOutcome {
+        termination: termination_kind(&result.termination),
+        termination_message: termination_message(&result.termination),
+        final_text: &result.final_text,
+        total_prompt_tokens: result.total_prompt_tokens,
+        total_completion_tokens: result.total_completion_tokens,
+        artifacts: &result.artifacts.paths,
+    };
+    fs::write(
+        run_dir.join("outcome.json"),
+        serde_json::to_vec_pretty(&outcome)?,
+    )?;
+    Ok(())
+}
+
+fn project_session_history(
+    user_records: &[TranscriptRecord],
+    result: &RunResult,
+) -> Vec<TranscriptRecord> {
+    let mut records = user_records.to_vec();
+    if matches!(&result.termination, LoopTermination::Complete)
+        && let Some(final_assistant) = result.records.iter().rev().find(|record| {
+            record.role == MessageRole::Assistant
+                && record
+                    .tool_calls
+                    .as_ref()
+                    .is_none_or(|calls| calls.is_empty())
+        })
+    {
+        records.push(final_assistant.clone());
+    }
+    records
+}
+
+fn termination_kind(termination: &LoopTermination) -> &'static str {
+    match termination {
+        LoopTermination::Complete => "complete",
+        LoopTermination::StepCapExceeded => "step_cap_exceeded",
+        LoopTermination::Timeout(_) => "timeout",
+        LoopTermination::Error(_) => "error",
+    }
+}
+
+fn termination_message(termination: &LoopTermination) -> Option<&str> {
+    match termination {
+        LoopTermination::Complete | LoopTermination::StepCapExceeded => None,
+        LoopTermination::Timeout(message) | LoopTermination::Error(message) => Some(message),
+    }
 }
 
 fn resolve_api_key(agent: &LoadedAgent, config: &GlobalConfig) -> Result<String, AppError> {
