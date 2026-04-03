@@ -2,7 +2,7 @@
 
 `headless` is a session-first, non-interactive CLI agent runner for coding and automation work.
 
-This repo contains the first implementation pass: a Rust binary with durable session storage, repo- or home-root agent and role loading, an OpenRouter-backed assistant/tool loop, artifact-backed tool transcripts, and seven built-in tools.
+This repo contains the first implementation pass: a Rust binary with durable session storage, repo- or home-root agent and role loading, an OpenRouter-backed assistant/tool loop, artifact-backed tool transcripts, and eight built-in tools.
 
 ## Current Scope
 
@@ -12,7 +12,7 @@ Implemented now:
 - OpenRouter chat completions integration
 - session metadata and JSONL transcript persistence
 - optimistic same-session conflict detection plus a dedicated mutating-run execution lock
-- built-in tools: `read_file`, `edit_file`, `write_file`, `glob`, `grep`, `apply_patch`, `bash`
+- built-in tools: `read_file`, `edit_file`, `write_file`, `glob`, `grep`, `apply_patch`, `bash`, `web_fetch`
 - repo-owned starter assets in `agents/`, `roles/`, `prompts/`, and `config.toml`
 - total run timeout enforcement across provider calls and tool execution
 
@@ -20,7 +20,6 @@ Deferred for a later pass:
 - `todo_write`
 - `skills`
 - `web_search`
-- `web_fetch`
 - rolling summaries and context compaction
 
 ## Quick Start
@@ -35,6 +34,7 @@ Inspect the CLI:
 
 ```bash
 cargo run -- version
+cargo run -- webfetch https://example.com
 cargo run -- agent list
 cargo run -- role list
 ```

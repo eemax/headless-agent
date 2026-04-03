@@ -3,6 +3,7 @@ pub mod files;
 pub mod glob;
 pub mod grep;
 pub mod patch;
+pub mod web_fetch;
 
 use std::{
     cell::RefCell,
@@ -204,6 +205,7 @@ pub fn builtin_specs(enabled_tools: &[String]) -> Vec<ToolSpec> {
             "grep" => specs.push(grep::grep_spec()),
             "apply_patch" => specs.push(patch::apply_patch_spec()),
             "bash" => specs.push(bash::bash_spec()),
+            "web_fetch" => specs.push(web_fetch::web_fetch_spec()),
             _ => {}
         }
     }
@@ -248,6 +250,7 @@ pub fn execute_tool(
         "grep" => grep::grep_search(context, arguments)?,
         "apply_patch" => patch::apply_patch(context, arguments)?,
         "bash" => bash::run_bash(context, arguments)?,
+        "web_fetch" => web_fetch::run_web_fetch(context, arguments)?,
         _ => {
             return context.finalize(
                 name,
@@ -266,6 +269,10 @@ pub fn tool_behavior(name: &str) -> Option<ToolBehavior> {
         "read_file" | "glob" | "grep" => Some(ToolBehavior {
             access: ToolAccess::ReadOnly,
             retryable: true,
+        }),
+        "web_fetch" => Some(ToolBehavior {
+            access: ToolAccess::ReadOnly,
+            retryable: false,
         }),
         "edit_file" | "write_file" | "apply_patch" | "bash" => Some(ToolBehavior {
             access: ToolAccess::Mutating,

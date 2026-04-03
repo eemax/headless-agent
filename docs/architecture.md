@@ -160,6 +160,7 @@ Current built-in tools:
 - `grep`
 - `apply_patch`
 - `bash`
+- `web_fetch`
 
 Tool properties:
 - allowed only if listed in the agent's `enabled_tools`
@@ -167,7 +168,7 @@ Tool properties:
 - return deterministic JSON payloads
 - persist their payloads through the artifact layer
 - in `--plan` mode, all tools become non-executing and return planned-action payloads
-- `read_file`, `glob`, and `grep` are retried on ordinary tool errors; mutating tools are single-attempt
+- `read_file`, `glob`, and `grep` are retried on ordinary tool errors; `web_fetch` is read-only but single-attempt; mutating tools are single-attempt
 - `bash` is treated as mutating and is killed on timeout, including its subprocess group
 - `apply_patch` keeps parsing and staging cancellable, but once filesystem commit begins it no longer consults the run budget; it either commits fully or rolls back
 
@@ -195,7 +196,6 @@ Not implemented yet:
 - `todo_write`
 - `skills`
 - `web_search`
-- `web_fetch`
 - summary compaction
 - alternate providers
 - streaming responses

@@ -129,6 +129,7 @@ enabled_tools = [
   "grep",
   "apply_patch",
   "bash",
+  "web_fetch",
 ]
 
 system_prompt_file = "../prompts/coder.md"
@@ -220,6 +221,7 @@ Recognized built-in tools in the first pass:
 - `grep`
 - `apply_patch`
 - `bash`
+- `web_fetch`
 
 Unknown tool names are ignored when building provider tool definitions, but a model cannot successfully call them because the dispatcher only knows the built-ins above.
 

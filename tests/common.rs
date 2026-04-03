@@ -86,7 +86,7 @@ default_model = "openai/gpt-4.1"
 default_effort = "medium"
 max_output_tokens = 12000
 compaction_at_tokens = 180000
-enabled_tools = ["read_file", "edit_file", "write_file", "glob", "grep", "apply_patch", "bash"]
+enabled_tools = ["read_file", "edit_file", "write_file", "glob", "grep", "apply_patch", "bash", "web_fetch"]
 system_prompt_file = "../prompts/{name}.md"
 timeout = "{timeout}"
 "#

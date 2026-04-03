@@ -38,6 +38,7 @@ fn plan_mode_returns_non_executing_results_for_all_core_tools() {
         "grep".to_string(),
         "apply_patch".to_string(),
         "bash".to_string(),
+        "web_fetch".to_string(),
     ];
     let run_control = new_run_control(&config, Duration::from_secs(5));
     let context = ToolContext::new(
@@ -67,6 +68,7 @@ fn plan_mode_returns_non_executing_results_for_all_core_tools() {
             json!({ "patch": "*** Begin Patch\n*** Add File: sample.txt\n+hello\n*** End Patch" }),
         ),
         ("bash", json!({ "command": "echo should-not-run" })),
+        ("web_fetch", json!({ "url": "https://example.com" })),
     ];
 
     for (name, args) in cases {

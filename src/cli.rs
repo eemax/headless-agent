@@ -6,6 +6,7 @@ use crate::{error::AppError, types::Effort};
 
 const USAGE: &str = "usage:
   headless version
+  headless webfetch <url>
   headless agent list
   headless role list
   headless session new
@@ -17,6 +18,7 @@ const USAGE: &str = "usage:
 #[derive(Debug, Clone)]
 pub enum Command {
     Version,
+    WebFetch { url: String },
     AgentList,
     RoleList,
     SessionNew,
@@ -68,11 +70,24 @@ where
                 Err(AppError::Usage(USAGE.to_string()))
             }
         }
+        Some("webfetch") => parse_webfetch(&args),
         Some("agent") => parse_simple_list("agent", &args, Command::AgentList),
         Some("role") => parse_simple_list("role", &args, Command::RoleList),
         Some("session") => parse_session_subcommand(&args),
         Some("--help") | Some("-h") | Some("help") => Err(AppError::Usage(USAGE.to_string())),
         _ => parse_run_args(args),
+    }
+}
+
+fn parse_webfetch(args: &[OsString]) -> Result<Command, AppError> {
+    if args.len() == 2 {
+        Ok(Command::WebFetch {
+            url: args[1].to_string_lossy().to_string(),
+        })
+    } else {
+        Err(AppError::Usage(format!(
+            "invalid `webfetch` command\n\n{USAGE}"
+        )))
     }
 }
 

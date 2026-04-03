@@ -19,6 +19,7 @@ use crate::{
     prompt::assemble_prompt,
     role_def::LoadedRole,
     session::{self, SessionCommit, SessionStore, new_id, now_rfc3339},
+    tools::web_fetch,
     types::{LoopTermination, MessageRole, RunOutcome, RunResult, SessionMeta, TranscriptRecord},
 };
 
@@ -70,6 +71,10 @@ pub fn run(command: Command, interrupted: Arc<AtomicBool>) -> Result<AppOutput, 
     match command {
         Command::Version => Ok(AppOutput {
             stdout: format!("{}\n", env!("CARGO_PKG_VERSION")),
+            stderr: Vec::new(),
+        }),
+        Command::WebFetch { url } => Ok(AppOutput {
+            stdout: web_fetch::render_cli_output(&web_fetch::fetch_url(&url)),
             stderr: Vec::new(),
         }),
         Command::AgentList => Ok(AppOutput {
