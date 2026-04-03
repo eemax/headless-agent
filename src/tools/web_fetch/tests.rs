@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io::{self, Read, Write},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener},
     sync::{
@@ -17,6 +17,7 @@ use super::{
     content::ExtractedContent,
     fetch_url_with_timeout,
     html::extract_html,
+    live_canaries::{self, CanaryCase, CanaryTier},
     render_cli_output,
     transport::{
         DnsResolver, HttpTransport, ResolveBackend, ResolverPool, TransportFailure,
@@ -1018,8 +1019,16 @@ fn http_links_render_as_markdown_and_non_http_links_stay_plain_text() {
         "##,
     );
 
-    assert!(result.content.contains("[docs](<https://example.test/docs>)"));
-    assert!(result.content.contains("[API](<https://api.example.test/v1>)"));
+    assert!(
+        result
+            .content
+            .contains("[docs](<https://example.test/docs>)")
+    );
+    assert!(
+        result
+            .content
+            .contains("[API](<https://api.example.test/v1>)")
+    );
     assert!(result.content.contains("footnotes"));
     assert!(!result.content.contains("#footnotes"));
     assert!(result.content.contains("this"));
@@ -1046,11 +1055,15 @@ fn candidate_root_scoring_skips_shell_main_for_real_article_content() {
         "#,
     );
 
-    assert!(result.content.contains("This release explains how the worker pool is initialized"));
     assert!(
-        !result
+        result
             .content
-            .contains("[Docs](<https://example.test/docs>) [Pricing](<https://example.test/pricing>)")
+            .contains("This release explains how the worker pool is initialized")
+    );
+    assert!(
+        !result.content.contains(
+            "[Docs](<https://example.test/docs>) [Pricing](<https://example.test/pricing>)"
+        )
     );
     assert!(!result.warnings.contains(&Warning::LowSignalExtraction));
 }
@@ -1823,10 +1836,7 @@ fn declared_oversized_response_returns_content_too_large_and_uses_browser_header
 
     assert_eq!(failure.kind, TransportFailureKind::TooLarge);
     assert_eq!(failure.context.status, Some(200));
-    assert_eq!(
-        failure.context.content_type.as_deref(),
-        Some("text/html")
-    );
+    assert_eq!(failure.context.content_type.as_deref(), Some("text/html"));
     assert_eq!(
         failure.context.final_url.as_deref(),
         Some("http://example.test/large")
@@ -2040,7 +2050,11 @@ fn github_repo_fixture_extracts_real_page_overview() {
 
     assert!(result.content.contains("## Top-level entries"));
     assert!(result.content.contains("- compiler/"));
-    assert!(result.content.contains("This is the main source code repository for"));
+    assert!(
+        result
+            .content
+            .contains("This is the main source code repository for")
+    );
     assert!(
         result
             .content
@@ -2067,7 +2081,11 @@ fn github_blob_fixture_extracts_real_blob_markdown() {
         GITHUB_BLOB_FIXTURE,
     );
 
-    assert!(result.content.contains("This is the main source code repository for"));
+    assert!(
+        result
+            .content
+            .contains("This is the main source code repository for")
+    );
     assert!(
         result
             .content
@@ -2126,55 +2144,335 @@ fn github_releases_fixture_extracts_the_first_real_release_section() {
 }
 
 #[test]
-#[ignore]
-fn github_live_canary_repo_page_extracts_overview() {
-    let result =
-        fetch_url_with_timeout("https://github.com/rust-lang/rust", Duration::from_secs(20));
-
-    assert!(result.ok);
-    assert_eq!(result.extraction_kind, super::ExtractionKind::HtmlPrimary);
-    assert!(result.content.contains("## Top-level entries"));
-}
-
-#[test]
-#[ignore]
-fn github_live_canary_issue_page_targets_current_issue() {
-    let result = fetch_url_with_timeout(
-        "https://github.com/rust-lang/rust/issues/1",
-        Duration::from_secs(20),
+fn prefers_primary_root_when_body_only_adds_layout_copy() {
+    let layout_copy = "Layout chrome that should stay outside the selected content. ".repeat(250);
+    let html = format!(
+        r#"
+        <html>
+          <body>
+            <main>
+              <h1>Guide</h1>
+              <p>This guide explains how to install, configure, and run the service safely.</p>
+              <p>It also covers troubleshooting, logging, metrics, deployment guidance, and recovery workflows.</p>
+            </main>
+            <div>{layout_copy}</div>
+          </body>
+        </html>
+        "#
     );
 
-    assert!(result.ok);
-    assert!(result.content.contains("Author: graydon"));
+    let result = html_output(&html);
+
+    assert_eq!(result.kind, super::ExtractionKind::HtmlPrimary);
+    assert!(result.content.contains("Title: Guide"));
     assert!(
-        result
+        !result
             .content
-            .contains("Thread a session or semantic context through IL")
+            .contains("Layout chrome that should stay outside the selected content.")
+    );
+}
+
+#[test]
+fn live_canary_manifest_has_unique_ids_and_expected_tier_sizes() {
+    let mut ids = HashSet::new();
+    let mut gating = 0usize;
+    let mut observational = 0usize;
+    let mut self_hosted_edge = 0usize;
+
+    for case in live_canaries::cases() {
+        assert!(
+            ids.insert(case.id.clone()),
+            "duplicate canary id `{}`",
+            case.id
+        );
+        match case.tier {
+            CanaryTier::Gating => gating += 1,
+            CanaryTier::Observational => observational += 1,
+            CanaryTier::SelfHostedEdge => self_hosted_edge += 1,
+        }
+    }
+
+    assert!((4..=6).contains(&gating));
+    assert!((15..=30).contains(&observational));
+    assert!(self_hosted_edge >= 9);
+}
+
+#[test]
+fn live_canary_manifest_contains_openai_docs_gating_case() {
+    let case = live_canaries::cases()
+        .iter()
+        .find(|case| case.id == "gating_openai_docs_function_calling")
+        .expect("openai docs canary");
+
+    assert_eq!(case.tier, CanaryTier::Gating);
+    assert_eq!(
+        case.url,
+        "https://developers.openai.com/api/docs/guides/function-calling"
+    );
+    assert_eq!(
+        case.expected_extraction_kind,
+        super::ExtractionKind::HtmlPrimary
+    );
+    assert_eq!(case.expected_status, Some(200));
+    assert_eq!(
+        case.expected_content_type_prefix.as_deref(),
+        Some("text/html")
+    );
+    assert_eq!(case.min_content_chars, 1200);
+    assert!(
+        case.required_markers
+            .iter()
+            .any(|marker| marker == "### Tool choice")
+    );
+    assert!(
+        case.forbidden_warnings
+            .contains(&Warning::LowSignalExtraction)
+    );
+    assert!(
+        case.forbidden_warnings
+            .contains(&Warning::PossibleJsRenderedPage)
     );
 }
 
 #[test]
 #[ignore]
-fn github_live_canary_pull_page_targets_current_pull() {
-    let result = fetch_url_with_timeout(
-        "https://github.com/rust-lang/rust/pull/140167",
-        Duration::from_secs(20),
-    );
-
-    assert!(result.ok);
-    assert!(result.content.contains("Author: bjorn3"));
-    assert!(result.content.contains("I tried this code:"));
+fn web_fetch_live_canaries_gating() {
+    run_live_canaries(CanaryTier::Gating);
 }
 
 #[test]
 #[ignore]
-fn github_live_canary_release_page_extracts_notes() {
-    let result = fetch_url_with_timeout(
-        "https://github.com/rust-lang/rust/releases/latest",
-        Duration::from_secs(20),
+fn web_fetch_live_canaries_observational() {
+    run_live_canaries(CanaryTier::Observational);
+}
+
+#[test]
+#[ignore]
+fn web_fetch_live_canaries_self_hosted_edge() {
+    run_live_canaries(CanaryTier::SelfHostedEdge);
+}
+
+fn run_live_canaries(target_tier: CanaryTier) {
+    if let Some(requested_tier) = live_canaries::requested_tier_filter()
+        && requested_tier != target_tier
+    {
+        eprintln!(
+            "skipping `{}` because `{}` requested tier `{}`",
+            target_tier.as_str(),
+            live_canaries::TIER_ENV,
+            requested_tier.as_str()
+        );
+        return;
+    }
+
+    let cases = live_canaries::cases_for_tier(target_tier);
+    assert!(
+        !cases.is_empty(),
+        "no live canary cases matched tier `{}`{}",
+        target_tier.as_str(),
+        live_canaries::requested_case_filter()
+            .map(|value| format!(" and case id `{value}`"))
+            .unwrap_or_default()
     );
 
-    assert!(result.ok);
-    assert!(result.content.contains("Author:"));
-    assert!(result.content.contains("Published:"));
+    let mut failures = Vec::new();
+    for case in cases {
+        let requested_url = live_canaries::resolve_case_url(case)
+            .unwrap_or_else(|error| panic!("failed to resolve canary `{}`: {}", case.id, error));
+        eprintln!(
+            "running live canary `{}` [{}] -> {}",
+            case.id,
+            target_tier.as_str(),
+            requested_url
+        );
+
+        let result = fetch_url_with_timeout(&requested_url, Duration::from_secs(20));
+        if let Err(failure) = assert_live_canary(case, &requested_url, &result) {
+            failures.push(failure);
+            continue;
+        }
+
+        eprintln!(
+            "passed live canary `{}` [{}]",
+            case.id,
+            target_tier.as_str()
+        );
+    }
+
+    assert!(
+        failures.is_empty(),
+        "live canary failures ({}):\n\n{}",
+        failures.len(),
+        failures.join("\n\n")
+    );
+}
+
+fn assert_live_canary(
+    case: &CanaryCase,
+    requested_url: &str,
+    result: &FetchResult,
+) -> Result<(), String> {
+    let mut mismatches = Vec::new();
+
+    if result.ok != case.expect_ok {
+        mismatches.push(format!(
+            "expected ok={}, got ok={}",
+            case.expect_ok, result.ok
+        ));
+    }
+
+    if result.status != case.expected_status {
+        mismatches.push(format!(
+            "expected status {:?}, got {:?}",
+            case.expected_status, result.status
+        ));
+    }
+
+    if result.extraction_kind != case.expected_extraction_kind {
+        mismatches.push(format!(
+            "expected extraction {}, got {}",
+            case.expected_extraction_kind.as_str(),
+            result.extraction_kind.as_str()
+        ));
+    }
+
+    if let Some(expected_error) = case.expected_error.as_deref()
+        && result.error.as_deref() != Some(expected_error)
+    {
+        mismatches.push(format!(
+            "expected error `{}`, got `{}`",
+            expected_error,
+            result.error.as_deref().unwrap_or("none")
+        ));
+    } else if case.expected_error.is_none() && result.error.is_some() && case.expect_ok {
+        mismatches.push(format!(
+            "expected no error, got `{}`",
+            result.error.as_deref().unwrap_or("none")
+        ));
+    }
+
+    if let Some(prefix) = case.expected_content_type_prefix.as_deref()
+        && !result
+            .content_type
+            .as_deref()
+            .unwrap_or("")
+            .starts_with(prefix)
+    {
+        mismatches.push(format!(
+            "expected content type prefix `{}`, got `{}`",
+            prefix,
+            result.content_type.as_deref().unwrap_or("-")
+        ));
+    }
+
+    if let Some(expected_prefix) = live_canaries::resolve_expected_final_url_prefix(case)
+        .unwrap_or_else(|error| {
+            panic!(
+                "failed to resolve final url prefix for `{}`: {}",
+                case.id, error
+            )
+        })
+        && !result
+            .final_url
+            .as_deref()
+            .unwrap_or("")
+            .starts_with(&expected_prefix)
+    {
+        mismatches.push(format!(
+            "expected final url prefix `{}`, got `{}`",
+            expected_prefix,
+            result.final_url.as_deref().unwrap_or("-")
+        ));
+    }
+
+    let content_len = result.content.chars().count();
+    if content_len < case.min_content_chars {
+        mismatches.push(format!(
+            "expected at least {} content chars, got {}",
+            case.min_content_chars, content_len
+        ));
+    }
+
+    for marker in &case.required_markers {
+        if !result.content.contains(marker) {
+            mismatches.push(format!("missing required marker `{marker}`"));
+        }
+    }
+
+    for marker in &case.forbidden_markers {
+        if result.content.contains(marker) {
+            mismatches.push(format!("found forbidden marker `{marker}`"));
+        }
+    }
+
+    for warning in &case.required_warnings {
+        if !result.warnings.contains(warning) {
+            mismatches.push(format!("missing required warning `{}`", warning.as_str()));
+        }
+    }
+
+    for warning in &case.forbidden_warnings {
+        if result.warnings.contains(warning) {
+            mismatches.push(format!("found forbidden warning `{}`", warning.as_str()));
+        }
+    }
+
+    if mismatches.is_empty() {
+        return Ok(());
+    }
+
+    Err(format_live_canary_failure(
+        case,
+        requested_url,
+        result,
+        &mismatches,
+    ))
+}
+
+fn format_live_canary_failure(
+    case: &CanaryCase,
+    requested_url: &str,
+    result: &FetchResult,
+    mismatches: &[String],
+) -> String {
+    let warnings = if result.warnings.is_empty() {
+        "none".to_string()
+    } else {
+        result
+            .warnings
+            .iter()
+            .map(Warning::as_str)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+
+    format!(
+        "[{}]\nrequested: {}\nfinal_url: {}\nstatus: {}\ncontent_type: {}\nextraction: {}\nwarnings: {}\nerror: {}\ncontent_chars: {}\nexcerpt:\n{}\n\nmismatches:\n- {}",
+        case.id,
+        requested_url,
+        result.final_url.as_deref().unwrap_or("-"),
+        result
+            .status
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".to_string()),
+        result.content_type.as_deref().unwrap_or("-"),
+        result.extraction_kind.as_str(),
+        warnings,
+        result.error.as_deref().unwrap_or("none"),
+        result.content.chars().count(),
+        content_excerpt(&result.content),
+        mismatches.join("\n- ")
+    )
+}
+
+fn content_excerpt(content: &str) -> String {
+    let mut excerpt = String::new();
+    for (index, ch) in content.chars().enumerate() {
+        if index >= 600 {
+            excerpt.push_str("\n...[truncated]...");
+            break;
+        }
+        excerpt.push(ch);
+    }
+    excerpt
 }

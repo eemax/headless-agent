@@ -15,6 +15,8 @@ mod sites;
 mod transport;
 
 #[cfg(test)]
+mod live_canaries;
+#[cfg(test)]
 mod tests;
 
 use transport::{StdDnsResolver, UreqTransport, fetch_with_clients};

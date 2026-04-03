@@ -102,6 +102,25 @@ The provider test strategy is intentional:
 
 Do not turn regular CI-style coverage into live network dependence.
 
+The web fetch live canaries are also opt-in and split into three tiers:
+- `gating` for a small fast confidence check
+- `observational` for a broader real-site corpus
+- `self_hosted_edge` for controlled edge-case pages you host yourself
+
+Useful runs:
+
+```bash
+cargo test web_fetch_live_canaries_gating -- --ignored --nocapture
+cargo test web_fetch_live_canaries_observational -- --ignored --nocapture
+HEADLESS_WEB_FETCH_CANARY_CASE_ID=gating_openai_docs_function_calling cargo test web_fetch_live_canaries_gating -- --ignored --nocapture
+HEADLESS_WEB_FETCH_CANARY_SELF_HOSTED_BASE_URL=https://canary.example.com cargo test web_fetch_live_canaries_self_hosted_edge -- --ignored --nocapture
+```
+
+Useful filters:
+- `HEADLESS_WEB_FETCH_CANARY_TIER`
+- `HEADLESS_WEB_FETCH_CANARY_CASE_ID`
+- `HEADLESS_WEB_FETCH_CANARY_SELF_HOSTED_BASE_URL` for the `self_hosted_edge` tier
+
 ## When Adding Features
 
 If you add a new CLI flag or command:

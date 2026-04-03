@@ -111,6 +111,7 @@ For tests and local harnessing, the implementation also supports `HEADLESS_REPO_
 - [Architecture](/Users/ysera/headless-agent/docs/architecture.md)
 - [Configuration reference](/Users/ysera/headless-agent/docs/headless.md)
 - [Developer playbook](/Users/ysera/headless-agent/docs/dev.md)
+- [Web fetch deep dive](docs/web_fetch.md)
 
 ## Repo Layout
 

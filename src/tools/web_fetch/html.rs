@@ -123,7 +123,11 @@ pub(super) fn extract_html(
         .as_deref()
         .or(metadata.h1.as_deref())
         .map(ToOwned::to_owned);
-    let rendered = render_root(root.element, displayed_title.as_deref(), parsed_source_url.as_ref());
+    let rendered = render_root(
+        root.element,
+        displayed_title.as_deref(),
+        parsed_source_url.as_ref(),
+    );
     let dom_body_text = rendered.text;
     let body_visible_text_len = rendered.visible_len;
     let low_signal = is_low_signal_extraction(
@@ -136,8 +140,8 @@ pub(super) fn extract_html(
         .filter(|value| !value.body.trim().is_empty())
         .map(|value| normalize_schema_text(&value.body));
     let rescued_body = rescued_site_body.clone().or_else(|| {
-            select_schema_fallback(&dom_body_text, body_visible_text_len, low_signal, &schema)
-        });
+        select_schema_fallback(&dom_body_text, body_visible_text_len, low_signal, &schema)
+    });
     let used_rescue = rescued_body.is_some();
     let body_text = rescued_body.unwrap_or(dom_body_text);
     let final_visible_text_len = body_text.chars().count();
@@ -502,12 +506,22 @@ fn select_best_root<'a>(
             .then_with(|| right.rendered.visible_len.cmp(&left.rendered.visible_len))
     });
 
-    candidates
+    let best_candidate = candidates
         .iter()
         .find(|candidate| !candidate.low_signal)
-        .unwrap_or(&candidates[0])
-        .root
-        .clone()
+        .unwrap_or(&candidates[0]);
+
+    if matches!(best_candidate.root.source, RootSource::Body)
+        && let Some(primary_candidate) = candidates.iter().find(|candidate| {
+            !candidate.low_signal
+                && !matches!(candidate.root.source, RootSource::Body)
+                && candidate.rendered.visible_len >= MIN_CONTENT_CHARS
+        })
+    {
+        return primary_candidate.root.clone();
+    }
+
+    best_candidate.root.clone()
 }
 
 fn collect_root_candidates<'a>(
@@ -602,11 +616,17 @@ fn evaluate_root_candidate<'a>(
         .element
         .descendent_elements()
         .filter(|element| element.value().name() == "a")
-        .map(|element| normalize_inline(&element.text().collect::<String>()).chars().count())
+        .map(|element| {
+            normalize_inline(&element.text().collect::<String>())
+                .chars()
+                .count()
+        })
         .sum::<usize>() as f64;
     let link_density = (link_text_len / visible_len).clamp(0.0, 1.0);
     let noise_penalty = noisy_token_penalty(root.element);
-    let body_penalty = matches!(root.source, RootSource::Body).then_some(120.0).unwrap_or(0.0);
+    let body_penalty = matches!(root.source, RootSource::Body)
+        .then_some(120.0)
+        .unwrap_or(0.0);
     let low_signal_penalty = low_signal.then_some(140.0).unwrap_or(0.0);
     let score = visible_len
         + (paragraph_count as f64 * 18.0)

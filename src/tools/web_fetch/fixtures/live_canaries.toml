@@ -1,0 +1,358 @@
+[[case]]
+id = "gating_github_issue_1"
+url = "https://github.com/rust-lang/rust/issues/1"
+tier = "gating"
+expect_ok = true
+expected_status = 200
+expected_extraction_kind = "HtmlPrimary"
+expected_content_type_prefix = "text/html"
+required_markers = ["Author: graydon", "## Discussion", "Thread a session or semantic context through IL"]
+forbidden_warnings = ["LowSignalExtraction", "PossibleJsRenderedPage"]
+min_content_chars = 150
+
+[[case]]
+id = "gating_openai_docs_function_calling"
+url = "https://developers.openai.com/api/docs/guides/function-calling"
+tier = "gating"
+expect_ok = true
+expected_status = 200
+expected_extraction_kind = "HtmlPrimary"
+expected_content_type_prefix = "text/html"
+required_markers = ["Title: Function calling", "## How it works", "### Tool choice"]
+forbidden_warnings = ["LowSignalExtraction", "PossibleJsRenderedPage"]
+min_content_chars = 1200
+
+[[case]]
+id = "gating_jsonplaceholder_todo_1"
+url = "https://jsonplaceholder.typicode.com/todos/1"
+tier = "gating"
+expect_ok = true
+expected_status = 200
+expected_extraction_kind = "Json"
+expected_content_type_prefix = "application/json"
+required_markers = ["\"id\": 1", "\"title\": \"delectus aut autem\""]
+min_content_chars = 50
+
+[[case]]
+id = "gating_w3_dummy_pdf"
+url = "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf"
+tier = "gating"
+expect_ok = true
+expected_status = 200
+expected_extraction_kind = "BinarySummary"
+expected_content_type_prefix = "application/pdf"
+required_markers = ["[BINARY CONTENT]", "content_type: application/pdf"]
+min_content_chars = 40
+
+[[case]]
+id = "gating_github_http_redirect"
+url = "http://github.com/rust-lang/rust"
+tier = "gating"
+expect_ok = true
+expected_status = 200
+expected_extraction_kind = "HtmlPrimary"
+expected_content_type_prefix = "text/html"
+expected_final_url_prefix = "https://github.com/rust-lang/rust"
+required_markers = ["## Top-level entries", "## Why Rust?"]
+forbidden_warnings = ["LowSignalExtraction", "PossibleJsRenderedPage"]
+min_content_chars = 400
+
+[[case]]
+id = "obs_github_repo_overview"
+url = "https://github.com/rust-lang/rust"
+tier = "observational"
+expect_ok = true
+expected_status = 200
+expected_extraction_kind = "HtmlPrimary"
+expected_content_type_prefix = "text/html"
+required_markers = ["## Top-level entries", "## Why Rust?"]
+forbidden_warnings = ["LowSignalExtraction", "PossibleJsRenderedPage"]
+min_content_chars = 400
+
+[[case]]
+id = "obs_github_issue_1"
+url = "https://github.com/rust-lang/rust/issues/1"
+tier = "observational"
+expect_ok = true
+expected_status = 200
+expected_extraction_kind = "HtmlPrimary"
+expected_content_type_prefix = "text/html"
+required_markers = ["Author: graydon", "## Discussion", "Thread a session or semantic context through IL"]
+forbidden_warnings = ["LowSignalExtraction", "PossibleJsRenderedPage"]
+min_content_chars = 150
+
+[[case]]
+id = "obs_github_pull_140167"
+url = "https://github.com/rust-lang/rust/pull/140167"
+tier = "observational"
+expect_ok = true
+expected_status = 200
+expected_extraction_kind = "HtmlPrimary"
+expected_content_type_prefix = "text/html"
+required_markers = ["Author: bjorn3", "I tried this code:"]
+forbidden_warnings = ["LowSignalExtraction", "PossibleJsRenderedPage"]
+min_content_chars = 150
+
+[[case]]
+id = "obs_github_release_1_94_1"
+url = "https://github.com/rust-lang/rust/releases/tag/1.94.1"
+tier = "observational"
+expect_ok = true
+expected_status = 200
+expected_extraction_kind = "HtmlPrimary"
+expected_content_type_prefix = "text/html"
+required_markers = ["Title: 1.94.1", "Author: rustbot", "std::thread::spawn"]
+forbidden_warnings = ["LowSignalExtraction", "PossibleJsRenderedPage"]
+min_content_chars = 120
+
+[[case]]
+id = "obs_openai_docs_function_calling"
+url = "https://developers.openai.com/api/docs/guides/function-calling"
+tier = "observational"
+expect_ok = true
+expected_status = 200
+expected_extraction_kind = "HtmlPrimary"
+expected_content_type_prefix = "text/html"
+required_markers = ["Title: Function calling", "## How it works", "### Tool choice"]
+forbidden_warnings = ["LowSignalExtraction", "PossibleJsRenderedPage"]
+min_content_chars = 1200
+
+[[case]]
+id = "obs_openai_article_function_calling_updates"
+url = "https://openai.com/index/function-calling-and-other-api-updates/"
+tier = "observational"
+expect_ok = true
+expected_status = 200
+expected_extraction_kind = "HtmlPrimary"
+expected_content_type_prefix = "text/html"
+required_markers = [
+  "Title: Function calling and other API updates",
+  "Published: 2024-03-13T07:00:00Z",
+  "Developers can now describe functions to `gpt-4-0613` and `gpt-3.5-turbo-0613`"
+]
+forbidden_warnings = ["LowSignalExtraction", "PossibleJsRenderedPage"]
+min_content_chars = 1200
+
+[[case]]
+id = "obs_mdn_fetch_api"
+url = "https://developer.mozilla.org/en-US/docs/Web/API/Fetch_API"
+tier = "observational"
+expect_ok = true
+expected_status = 200
+expected_extraction_kind = "HtmlPrimary"
+expected_content_type_prefix = "text/html"
+required_markers = ["Title: Fetch API - Web APIs | MDN", "## Concepts and usage", "## Browser compatibility"]
+forbidden_warnings = ["LowSignalExtraction", "PossibleJsRenderedPage"]
+min_content_chars = 800
+
+[[case]]
+id = "obs_rust_book_installation"
+url = "https://doc.rust-lang.org/book/ch01-01-installation.html"
+tier = "observational"
+expect_ok = true
+expected_status = 200
+expected_extraction_kind = "HtmlPrimary"
+expected_content_type_prefix = "text/html"
+required_markers = [
+  "Title: Installation - The Rust Programming Language",
+  "Rust is installed now. Great!",
+  "To check whether you have Rust installed correctly"
+]
+forbidden_warnings = ["LowSignalExtraction", "PossibleJsRenderedPage"]
+min_content_chars = 1200
+
+[[case]]
+id = "obs_jsonplaceholder_todo_1"
+url = "https://jsonplaceholder.typicode.com/todos/1"
+tier = "observational"
+expect_ok = true
+expected_status = 200
+expected_extraction_kind = "Json"
+expected_content_type_prefix = "application/json"
+required_markers = ["\"id\": 1", "\"title\": \"delectus aut autem\""]
+min_content_chars = 50
+
+[[case]]
+id = "obs_httpbin_json"
+url = "https://httpbin.org/json"
+tier = "observational"
+expect_ok = true
+expected_status = 200
+expected_extraction_kind = "Json"
+expected_content_type_prefix = "application/json"
+required_markers = ["\"slideshow\": {", "\"title\": \"Sample Slide Show\""]
+min_content_chars = 100
+
+[[case]]
+id = "obs_rssboard_sample_rss"
+url = "https://www.rssboard.org/files/sample-rss-2.xml"
+tier = "observational"
+expect_ok = true
+expected_status = 200
+expected_extraction_kind = "Text"
+expected_content_type_prefix = "text/xml"
+required_markers = ["<rss version=\"2.0\"", "<title>NASA Space Station News</title>"]
+min_content_chars = 200
+
+[[case]]
+id = "obs_rfc9110_text"
+url = "https://www.rfc-editor.org/rfc/rfc9110.txt"
+tier = "observational"
+expect_ok = true
+expected_status = 200
+expected_extraction_kind = "Text"
+expected_content_type_prefix = "text/plain"
+required_markers = ["Request for Comments: 9110", "HTTP Semantics"]
+required_warnings = ["ContentTruncated"]
+min_content_chars = 3000
+
+[[case]]
+id = "obs_rust_readme_raw"
+url = "https://raw.githubusercontent.com/rust-lang/rust/master/README.md"
+tier = "observational"
+expect_ok = true
+expected_status = 200
+expected_extraction_kind = "Text"
+expected_content_type_prefix = "text/plain"
+required_markers = ["This is the main source code repository for [Rust].", "## Why Rust?"]
+min_content_chars = 600
+
+[[case]]
+id = "obs_w3_dummy_pdf"
+url = "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf"
+tier = "observational"
+expect_ok = true
+expected_status = 200
+expected_extraction_kind = "BinarySummary"
+expected_content_type_prefix = "application/pdf"
+required_markers = ["[BINARY CONTENT]", "content_type: application/pdf"]
+min_content_chars = 40
+
+[[case]]
+id = "obs_github_http_redirect"
+url = "http://github.com/rust-lang/rust"
+tier = "observational"
+expect_ok = true
+expected_status = 200
+expected_extraction_kind = "HtmlPrimary"
+expected_content_type_prefix = "text/html"
+expected_final_url_prefix = "https://github.com/rust-lang/rust"
+required_markers = ["## Top-level entries", "## Why Rust?"]
+forbidden_warnings = ["LowSignalExtraction", "PossibleJsRenderedPage"]
+min_content_chars = 400
+
+[[case]]
+id = "obs_httpbin_html"
+url = "https://httpbin.org/html"
+tier = "observational"
+expect_ok = true
+expected_status = 200
+expected_extraction_kind = "HtmlFallback"
+expected_content_type_prefix = "text/html"
+required_markers = ["Title: Herman Melville - Moby-Dick", "Availing himself of the mild, summer-cool weather"]
+forbidden_warnings = ["LowSignalExtraction", "PossibleJsRenderedPage"]
+min_content_chars = 400
+
+[[case]]
+id = "self_hosted_windows_1252_html"
+url = "/encoding/windows-1252"
+tier = "self_hosted_edge"
+expect_ok = true
+expected_status = 200
+expected_extraction_kind = "HtmlPrimary"
+expected_content_type_prefix = "text/html"
+required_markers = ["Title: Café", "“Quoted” café costs €10."]
+forbidden_warnings = ["LowSignalExtraction", "PossibleJsRenderedPage"]
+min_content_chars = 20
+
+[[case]]
+id = "self_hosted_js_shell_empty"
+url = "/shell/next-empty"
+tier = "self_hosted_edge"
+expect_ok = true
+expected_status = 200
+expected_extraction_kind = "HtmlFallback"
+expected_content_type_prefix = "text/html"
+required_markers = ["Title: App"]
+required_warnings = ["LowContentYield", "LowSignalExtraction", "PossibleJsRenderedPage"]
+min_content_chars = 5
+
+[[case]]
+id = "self_hosted_json_octet_stream"
+url = "/json/octet-stream"
+tier = "self_hosted_edge"
+expect_ok = true
+expected_status = 200
+expected_extraction_kind = "Json"
+expected_content_type_prefix = "application/json"
+required_markers = ["\"hello\": \"world\""]
+min_content_chars = 10
+
+[[case]]
+id = "self_hosted_404_with_body"
+url = "/errors/404-body"
+tier = "self_hosted_edge"
+expect_ok = false
+expected_status = 404
+expected_error = "http_404"
+expected_extraction_kind = "Error"
+expected_content_type_prefix = "text/html"
+required_markers = ["Title: Missing", "Not here."]
+min_content_chars = 10
+
+[[case]]
+id = "self_hosted_pdf_binary"
+url = "/binary/sample.pdf"
+tier = "self_hosted_edge"
+expect_ok = true
+expected_status = 200
+expected_extraction_kind = "BinarySummary"
+expected_content_type_prefix = "application/pdf"
+required_markers = ["[BINARY CONTENT]", "content_type: application/pdf"]
+min_content_chars = 30
+
+[[case]]
+id = "self_hosted_redirect_chain"
+url = "/redirect/chain"
+tier = "self_hosted_edge"
+expect_ok = true
+expected_status = 200
+expected_extraction_kind = "HtmlPrimary"
+expected_content_type_prefix = "text/html"
+expected_final_url_prefix = "/redirect/final"
+required_markers = ["Title: Redirect Final", "Hello world."]
+min_content_chars = 20
+
+[[case]]
+id = "self_hosted_redirect_loop"
+url = "/redirect/loop"
+tier = "self_hosted_edge"
+expect_ok = false
+expected_status = 302
+expected_error = "redirect_error"
+expected_extraction_kind = "Error"
+expected_content_type_prefix = "text/plain"
+min_content_chars = 0
+
+[[case]]
+id = "self_hosted_xml_feed"
+url = "/xml/feed"
+tier = "self_hosted_edge"
+expect_ok = true
+expected_status = 200
+expected_extraction_kind = "Text"
+expected_content_type_prefix = "application/xml"
+required_markers = ["<feed><title>News</title></feed>"]
+min_content_chars = 20
+
+[[case]]
+id = "self_hosted_large_truncated_text"
+url = "/large/truncated"
+tier = "self_hosted_edge"
+expect_ok = true
+expected_status = 200
+expected_extraction_kind = "Text"
+expected_content_type_prefix = "text/plain"
+required_markers = ["payload-begin"]
+required_warnings = ["ContentTruncated"]
+min_content_chars = 5000
