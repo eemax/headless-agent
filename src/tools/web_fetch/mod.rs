@@ -25,8 +25,10 @@ const MAX_REDIRECTS: usize = 5;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const MAX_DOWNLOAD_BYTES: usize = 4 * 1024 * 1024;
-const MAX_CONTENT_CHARS: usize = 16_000;
-const MIN_CONTENT_CHARS: usize = 100;
+const MAX_CONTENT_CHARS: usize = 256 * 1024;
+const MIN_CONTENT_CHARS: usize = 200;
+const MIN_LOW_SIGNAL_CHARS: usize = 200;
+const MIN_PRIMARY_ROOT_CHARS: usize = 100;
 const MAX_ADDRESS_ATTEMPTS: usize = 4;
 
 const NOISY_TAGS: &[&str] = &[

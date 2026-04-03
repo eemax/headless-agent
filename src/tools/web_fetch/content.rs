@@ -1,9 +1,11 @@
 use encoding_rs::{Encoding, UTF_8, WINDOWS_1252};
+use serde::de::IgnoredAny;
 use serde_json::Value;
 
 use super::{ExtractionKind, MAX_CONTENT_CHARS, Warning, html::extract_html};
 
 const MAX_JSON_SNIFF_BYTES: usize = 256 * 1024;
+const MAX_JSON_PRETTY_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Debug)]
 pub(super) struct ExtractedContent {
@@ -32,7 +34,7 @@ pub(super) fn extract_content(
 ) -> ExtractedContent {
     let kind = sniff_content_kind(content_type_header, body);
     match kind {
-        SniffedKind::Json => extract_json(body, body_truncated),
+        SniffedKind::Json => extract_json(content_type_header, body, body_truncated),
         SniffedKind::Html => {
             let rendered = decode_text_body(content_type_header, body, true);
             extract_html(source_url, content_type_header, &rendered, body_truncated)
@@ -47,9 +49,26 @@ pub(super) fn extract_content(
     }
 }
 
-fn extract_json(body: &[u8], body_truncated: bool) -> ExtractedContent {
-    let content_type = Some("application/json".to_string());
-    if !body_truncated && let Ok(value) = serde_json::from_slice::<Value>(body) {
+fn strip_utf8_bom(body: &[u8]) -> &[u8] {
+    body.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(body)
+}
+
+fn extract_json(
+    content_type_header: Option<&str>,
+    body: &[u8],
+    body_truncated: bool,
+) -> ExtractedContent {
+    let content_type = normalize_content_type(content_type_header)
+        .or_else(|| Some("application/json".to_string()));
+    let explicit_json = content_type
+        .as_deref()
+        .map(|value| value == "application/json" || value.ends_with("+json"))
+        .unwrap_or(false);
+    let body = strip_utf8_bom(body);
+    if !body_truncated
+        && body.len() <= MAX_JSON_PRETTY_BYTES
+        && let Ok(value) = serde_json::from_slice::<Value>(body)
+    {
         let rendered = serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
         let (content, content_truncated) = truncate_chars(&rendered, MAX_CONTENT_CHARS);
         return ExtractedContent {
@@ -62,10 +81,17 @@ fn extract_json(body: &[u8], body_truncated: bool) -> ExtractedContent {
         };
     }
 
-    let rendered = String::from_utf8_lossy(body).to_string();
+    let byte_limit = MAX_CONTENT_CHARS.saturating_mul(4);
+    let sample = &body[..body.len().min(byte_limit)];
+    let rendered = String::from_utf8_lossy(sample);
     let (content, content_truncated) = truncate_chars(&rendered, MAX_CONTENT_CHARS);
+    let truncated = body_truncated || content_truncated || body.len() > byte_limit;
+    let oversized_explicit_json_is_valid = explicit_json
+        && !body_truncated
+        && body.len() > MAX_JSON_PRETTY_BYTES
+        && parses_as_json(body);
     let mut warnings = Vec::new();
-    if body_truncated || content_truncated {
+    if truncated {
         push_warning(&mut warnings, Warning::ContentTruncated);
     }
     ExtractedContent {
@@ -73,8 +99,16 @@ fn extract_json(body: &[u8], body_truncated: bool) -> ExtractedContent {
         content_type,
         content,
         warnings,
-        truncated: body_truncated || content_truncated,
-        error: (!body_truncated).then_some("decode_error"),
+        truncated,
+        error: if body_truncated {
+            None
+        } else if body.len() <= MAX_JSON_PRETTY_BYTES {
+            Some("decode_error")
+        } else if explicit_json && !oversized_explicit_json_is_valid {
+            Some("decode_error")
+        } else {
+            None
+        },
     }
 }
 
@@ -185,8 +219,10 @@ fn decode_text_body(
     sniff_html_meta: bool,
 ) -> String {
     let encoding = detect_encoding(content_type_header, body, sniff_html_meta);
-    if encoding == UTF_8 && std::str::from_utf8(body).is_ok() {
-        return String::from_utf8_lossy(body).into_owned();
+    if encoding == UTF_8 {
+        if let Ok(valid) = std::str::from_utf8(body) {
+            return valid.to_string();
+        }
     }
     let (decoded, _, _) = encoding.decode(body);
     decoded.into_owned()
@@ -275,10 +311,6 @@ fn looks_like_html(body: &[u8]) -> bool {
     let sample = String::from_utf8_lossy(&body[..body.len().min(2048)]).to_ascii_lowercase();
     let trimmed = sample.trim_start();
     trimmed.starts_with("<!doctype html")
-        || trimmed.starts_with("<html")
-        || trimmed.starts_with("<body")
-        || trimmed.starts_with("<main")
-        || trimmed.starts_with("<article")
         || sample.contains("<html")
         || sample.contains("<body")
         || sample.contains("<main")
@@ -286,15 +318,19 @@ fn looks_like_html(body: &[u8]) -> bool {
 }
 
 fn looks_like_json(body: &[u8]) -> bool {
-    let sample = String::from_utf8_lossy(&body[..body.len().min(8192)]);
-    let trimmed = sample.trim_start();
-    if !(trimmed.starts_with('{') || trimmed.starts_with('[')) {
+    let body = strip_utf8_bom(body);
+    let first = body.iter().find(|b| !b.is_ascii_whitespace());
+    if !matches!(first, Some(b'{') | Some(b'[')) {
         return false;
     }
     if body.len() > MAX_JSON_SNIFF_BYTES {
         return false;
     }
-    serde_json::from_slice::<Value>(body).is_ok()
+    parses_as_json(body)
+}
+
+fn parses_as_json(body: &[u8]) -> bool {
+    serde_json::from_slice::<IgnoredAny>(body).is_ok()
 }
 
 fn looks_like_text(body: &[u8]) -> bool {
@@ -325,7 +361,14 @@ fn has_binary_signature(body: &[u8]) -> bool {
 }
 
 pub(super) fn normalize_inline(input: &str) -> String {
-    input.split_whitespace().collect::<Vec<_>>().join(" ")
+    let mut output = String::new();
+    for word in input.split_whitespace() {
+        if !output.is_empty() {
+            output.push(' ');
+        }
+        output.push_str(word);
+    }
+    output
 }
 
 fn normalize_text_body(input: &str) -> String {
@@ -333,14 +376,12 @@ fn normalize_text_body(input: &str) -> String {
 }
 
 pub(super) fn truncate_chars(input: &str, limit: usize) -> (String, bool) {
-    let mut output = String::new();
-    for (count, ch) in input.chars().enumerate() {
-        if count == limit {
-            return (output, true);
-        }
-        output.push(ch);
+    let mut char_indices = input.char_indices();
+    if let Some((byte_offset, _)) = char_indices.nth(limit) {
+        (input[..byte_offset].to_string(), true)
+    } else {
+        (input.to_string(), false)
     }
-    (output, false)
 }
 
 pub(super) fn warning_list(content_truncated: bool) -> Vec<Warning> {

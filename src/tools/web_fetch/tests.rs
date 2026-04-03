@@ -921,7 +921,7 @@ fn simple_tables_render_as_markdown_and_complex_tables_fall_back_to_text() {
 
 #[test]
 fn truncation_closes_fenced_code_blocks() {
-    let long_code = "line\n".repeat(5000);
+    let long_code = "line\n".repeat(60_000);
     let html = format!(
         "<html><body><main><pre><code>{}</code></pre></main></body></html>",
         long_code
@@ -988,7 +988,7 @@ beta</code></pre>
 
 #[test]
 fn truncation_closes_the_exact_open_code_fence() {
-    let long_code = format!("{}\n```\nclosing candidate", "line\n".repeat(5000));
+    let long_code = format!("{}\n```\nclosing candidate", "line\n".repeat(60_000));
     let html = format!(
         "<html><body><main><pre><code class=\"language-md\">{}</code></pre></main></body></html>",
         long_code
@@ -1557,7 +1557,10 @@ fn json_sniffing_works_for_generic_content_type() {
     );
     assert!(result.ok);
     assert_eq!(result.extraction_kind, super::ExtractionKind::Json);
-    assert_eq!(result.content_type.as_deref(), Some("application/json"));
+    assert_eq!(
+        result.content_type.as_deref(),
+        Some("application/octet-stream")
+    );
     assert!(result.content.contains("\"hello\": \"world\""));
 }
 
@@ -1665,6 +1668,63 @@ fn explicit_json_content_type_still_renders_json_when_large() {
     assert_eq!(result.extraction_kind, super::ExtractionKind::Json);
     assert_eq!(result.content_type.as_deref(), Some("application/json"));
     assert!(result.content.contains("\"payload\": \""));
+}
+
+#[test]
+fn oversized_json_skips_pretty_printing() {
+    let resolver = FakeResolver::default().with_mapping("example.test", 80, vec![socket(80)]);
+    let payload = format!(r#"{{"data":"{}"}}"#, "y".repeat(2_500_000));
+    let transport = FakeTransport::new(HashMap::from([(
+        ("http://example.test/oversized-json".to_string(), socket(80)),
+        Ok(response(
+            "http://example.test/oversized-json",
+            200,
+            Some("application/json"),
+            payload.as_bytes(),
+        )),
+    )]));
+    let result = fetch_with_clients(
+        "http://example.test/oversized-json",
+        REQUEST_TIMEOUT,
+        &resolver,
+        &transport,
+    );
+    assert!(result.ok);
+    assert_eq!(result.extraction_kind, super::ExtractionKind::Json);
+    assert!(result.truncated);
+    assert!(result.error.is_none());
+    // Raw JSON (no spaces around colon) since pretty-printing was skipped
+    assert!(result.content.contains("\"data\":\""));
+    assert!(!result.content.contains("\"data\": \""));
+}
+
+#[test]
+fn oversized_invalid_explicit_json_returns_decode_error() {
+    let resolver = FakeResolver::default().with_mapping("example.test", 80, vec![socket(80)]);
+    let payload = format!(r#"{{"data":"{}"#, "y".repeat(2_500_000));
+    let transport = FakeTransport::new(HashMap::from([(
+        (
+            "http://example.test/oversized-invalid-json".to_string(),
+            socket(80),
+        ),
+        Ok(response(
+            "http://example.test/oversized-invalid-json",
+            200,
+            Some("application/json"),
+            payload.as_bytes(),
+        )),
+    )]));
+    let result = fetch_with_clients(
+        "http://example.test/oversized-invalid-json",
+        REQUEST_TIMEOUT,
+        &resolver,
+        &transport,
+    );
+    assert!(!result.ok);
+    assert_eq!(result.extraction_kind, super::ExtractionKind::Error);
+    assert_eq!(result.error.as_deref(), Some("decode_error"));
+    assert!(result.truncated);
+    assert!(result.content.contains("\"data\":\""));
 }
 
 #[test]
@@ -2165,6 +2225,7 @@ fn prefers_primary_root_when_body_only_adds_layout_copy() {
 
     assert_eq!(result.kind, super::ExtractionKind::HtmlPrimary);
     assert!(result.content.contains("Title: Guide"));
+    assert!(result.warnings.contains(&Warning::LowContentYield));
     assert!(
         !result
             .content

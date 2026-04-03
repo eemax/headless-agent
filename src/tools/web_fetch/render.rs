@@ -338,6 +338,14 @@ fn collect_inline_tokens_from_element(
                 tokens.push(InlineToken::Text(text));
             }
         }
+        "img" => {
+            if let Some(alt) = element.value().attr("alt") {
+                let text = normalize_inline(alt);
+                if !text.is_empty() {
+                    tokens.push(InlineToken::Text(text));
+                }
+            }
+        }
         _ => {
             for child in element.children() {
                 if let Some(text) = child.value().as_text() {

@@ -5,7 +5,7 @@ use serde_json::Value;
 use url::Url;
 
 use super::{
-    ExtractionKind, MIN_CONTENT_CHARS, Warning,
+    ExtractionKind, MIN_CONTENT_CHARS, MIN_LOW_SIGNAL_CHARS, MIN_PRIMARY_ROOT_CHARS, Warning,
     content::{
         ExtractedContent, normalize_content_type, normalize_inline, push_warning, truncate_chars,
         warning_list,
@@ -515,7 +515,7 @@ fn select_best_root<'a>(
         && let Some(primary_candidate) = candidates.iter().find(|candidate| {
             !candidate.low_signal
                 && !matches!(candidate.root.source, RootSource::Body)
-                && candidate.rendered.visible_len >= MIN_CONTENT_CHARS
+                && candidate.rendered.visible_len >= MIN_PRIMARY_ROOT_CHARS
         })
     {
         return primary_candidate.root.clone();
@@ -592,37 +592,26 @@ fn evaluate_root_candidate<'a>(
     let visible_len = rendered.visible_len.max(1) as f64;
     let raw_html_len = raw_html_len.max(1) as f64;
     let yield_ratio = visible_len / raw_html_len;
-    let paragraph_count = root
-        .element
-        .descendent_elements()
-        .filter(|element| matches!(element.value().name(), "p" | "figcaption"))
-        .count();
-    let list_item_count = root
-        .element
-        .descendent_elements()
-        .filter(|element| element.value().name() == "li")
-        .count();
-    let code_block_count = root
-        .element
-        .descendent_elements()
-        .filter(|element| element.value().name() == "pre")
-        .count();
-    let table_count = root
-        .element
-        .descendent_elements()
-        .filter(|element| element.value().name() == "table")
-        .count();
-    let link_text_len = root
-        .element
-        .descendent_elements()
-        .filter(|element| element.value().name() == "a")
-        .map(|element| {
-            normalize_inline(&element.text().collect::<String>())
-                .chars()
-                .count()
-        })
-        .sum::<usize>() as f64;
-    let link_density = (link_text_len / visible_len).clamp(0.0, 1.0);
+    let mut paragraph_count = 0usize;
+    let mut list_item_count = 0usize;
+    let mut code_block_count = 0usize;
+    let mut table_count = 0usize;
+    let mut link_text_len = 0usize;
+    for element in root.element.descendent_elements() {
+        match element.value().name() {
+            "p" | "figcaption" => paragraph_count += 1,
+            "li" => list_item_count += 1,
+            "pre" => code_block_count += 1,
+            "table" => table_count += 1,
+            "a" => {
+                link_text_len += normalize_inline(&element.text().collect::<String>())
+                    .chars()
+                    .count();
+            }
+            _ => {}
+        }
+    }
+    let link_density = (link_text_len as f64 / visible_len).clamp(0.0, 1.0);
     let noise_penalty = noisy_token_penalty(root.element);
     let body_penalty = matches!(root.source, RootSource::Body)
         .then_some(120.0)
@@ -768,13 +757,11 @@ fn is_low_signal_extraction(body_text: &str, visible_len: usize, raw_html_len: u
     if body_text.trim().is_empty() || visible_len == 0 {
         return true;
     }
-
-    let raw_html_len = raw_html_len.max(1);
-    let yield_ratio = visible_len as f64 / raw_html_len as f64;
-
-    (visible_len < MIN_CONTENT_CHARS && raw_html_len >= 2_048)
-        || (visible_len < 300 && raw_html_len >= 32_768 && yield_ratio < 0.02)
-        || (visible_len < 2_000 && raw_html_len >= 500_000 && yield_ratio < 0.005)
+    if raw_html_len < 2_048 {
+        return false;
+    }
+    // Need at least 200 chars or 2% of the HTML size, whichever is larger.
+    visible_len < MIN_LOW_SIGNAL_CHARS.max(raw_html_len / 50)
 }
 
 fn html_has_shell_markers(html: &str) -> bool {

@@ -138,8 +138,8 @@ The current constants are defined in [`src/tools/web_fetch/mod.rs`](../src/tools
 - connect timeout: `3s`
 - max redirects: `5`
 - max download size: `4 MiB`
-- max rendered content: `16_000` characters
-- minimum "healthy" HTML visible content target: `100` characters
+- max rendered content: `256 * 1024` (262,144) characters
+- minimum "healthy" HTML visible content target: `200` characters
 - max address attempts per resolved target: `4`
 - DNS resolver worker count: `4`
 - DNS resolver queue capacity: `64`
@@ -355,7 +355,8 @@ That Windows-1252 fallback is important for older HTML pages and some edge-case 
 
 JSON handling tries to be helpful without pretending partial payloads are fully valid:
 
-- full untruncated JSON bodies are pretty-printed
+- JSON bodies up to 2 MiB are parsed and pretty-printed; larger bodies are returned as raw text to avoid excessive memory use
+- UTF-8 BOM is stripped before parsing
 - if pretty parsing fails, the raw text body is returned
 - explicitly declared JSON remains `Json` even when large
 - generic `application/octet-stream` content can still become `Json` if it parses and is within the sniff cap
@@ -366,7 +367,7 @@ Plain text extraction is deliberately conservative:
 
 - line endings are normalized
 - indentation, blank lines, tabs, and nested structure are preserved
-- content is truncated only at the 16,000-character output cap
+- content is truncated only at the 262,144-character output cap
 
 This matters for files like:
 
@@ -464,11 +465,7 @@ Returned extraction kind:
 
 `is_low_signal_extraction()` is the generic "this page mostly did not yield real content" check.
 
-It flags output when, for example:
-
-- visible content is extremely short
-- the HTML is large but the extracted visible text is tiny
-- the text-to-HTML yield ratio is suspiciously low for the size of the page
+Pages under 2 KiB of raw HTML are never flagged (they are genuinely tiny, not failed extractions). For larger pages, the check requires at least 200 visible characters or 2% of the raw HTML size, whichever is larger. This single continuous threshold replaces the earlier multi-band approach and eliminates gap coverage between the old discrete conditions.
 
 This feeds both candidate scoring and final warnings.
 
@@ -651,7 +648,7 @@ Current warnings:
 
 ### `LowContentYield`
 
-Assigned when the final visible text is under 100 characters.
+Assigned when the final visible text is under 200 characters.
 
 ### `LowSignalExtraction`
 
@@ -675,7 +672,7 @@ Current shell markers include strings such as:
 Assigned when either:
 
 - the response body exceeded the download cap
-- the rendered output exceeded the 16,000-character output cap
+- the rendered output exceeded the 262,144-character output cap
 
 ## Error Semantics
 

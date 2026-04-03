@@ -473,7 +473,6 @@ fn candidate_addresses(addresses: &[SocketAddr]) -> Vec<SocketAddr> {
     if unique.len() <= MAX_ADDRESS_ATTEMPTS
         && (unique.iter().all(|addr| addr.is_ipv4()) || unique.iter().all(|addr| addr.is_ipv6()))
     {
-        unique.truncate(MAX_ADDRESS_ATTEMPTS);
         return unique;
     }
 
