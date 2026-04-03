@@ -1,0 +1,45 @@
+<html>
+  <head>
+    <title>Bad codegen for comparing struct of two 16bit ints · Pull Request #140167 · rust-lang/rust · GitHub</title>
+  </head>
+  <body>
+    <script type="application/json" data-target="react-app.embeddedData">
+      {
+        "payload": {
+          "preloadedQueries": [
+            {
+              "result": {
+                "data": {
+                  "repository": {
+                    "issue": {
+                      "number": 1400,
+                      "createdAt": "2024-01-01T00:00:00Z",
+                      "author": { "login": "ghost" },
+                      "body": "Wrong pull body from a related item."
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "result": {
+                "data": {
+                  "repository": {
+                    "issue": {
+                      "number": 140167,
+                      "title": "Bad codegen for comparing struct of two 16bit ints",
+                      "url": "https://github.com/rust-lang/rust/issues/140167",
+                      "createdAt": "2025-04-22T15:47:18Z",
+                      "author": { "login": "bjorn3" },
+                      "body": "I tried this code:\n\n```rust\n#[derive(Clone, Copy, PartialEq)]\npub struct Foo {\n    pub x: u16,\n    pub y: u16,\n}\n```\n\nI expected to see this happen: `a` and `b` are loaded into a single register each and then compared against each other."
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    </script>
+  </body>
+</html>

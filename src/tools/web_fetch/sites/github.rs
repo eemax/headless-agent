@@ -7,7 +7,10 @@ use url::Url;
 use super::SiteExtraction;
 use crate::tools::web_fetch::{
     content::normalize_inline,
-    render::{render_element_blocks, render_html_fragment, strip_outer_blank_lines},
+    render::{
+        render_element_blocks, render_html_fragment, render_markdown_code_block,
+        strip_outer_blank_lines,
+    },
 };
 
 static SELECTORS: OnceLock<Result<Selectors, String>> = OnceLock::new();
@@ -33,8 +36,8 @@ enum GithubRoute {
     RepoOverview,
     Tree,
     Blob,
-    Issue,
-    Pull,
+    Issue { number: u64 },
+    Pull { number: u64 },
     Releases,
     ReleaseLatest,
     ReleaseTag,
@@ -56,8 +59,8 @@ pub(super) fn extract(source_url: Option<&str>, document: &Html) -> Option<SiteE
         GithubRoute::RepoOverview => extract_repo_overview(document, selectors),
         GithubRoute::Tree => extract_tree(document, selectors),
         GithubRoute::Blob => extract_blob(document, selectors),
-        GithubRoute::Issue => extract_issue_or_pull(document, selectors, true),
-        GithubRoute::Pull => extract_issue_or_pull(document, selectors, false),
+        GithubRoute::Issue { number } => extract_issue_or_pull(document, selectors, number, true),
+        GithubRoute::Pull { number } => extract_issue_or_pull(document, selectors, number, false),
         GithubRoute::Releases | GithubRoute::ReleaseLatest => {
             extract_release(document, selectors, ReleaseScope::FirstSection)
         }
@@ -143,7 +146,7 @@ fn extract_blob(document: &Html, selectors: &Selectors) -> Option<SiteExtraction
     .and_then(Value::as_str)
     .map(|value| value.trim().to_ascii_lowercase())
     .filter(|value| !value.is_empty());
-    let body = render_code_fence(language.as_deref(), &raw_lines);
+    let body = render_markdown_code_block(language.as_deref(), &raw_lines);
 
     Some(SiteExtraction {
         body,
@@ -154,9 +157,10 @@ fn extract_blob(document: &Html, selectors: &Selectors) -> Option<SiteExtraction
 fn extract_issue_or_pull(
     document: &Html,
     selectors: &Selectors,
+    route_number: u64,
     is_issue: bool,
 ) -> Option<SiteExtraction> {
-    let embedded = extract_embedded_discussion(document, selectors);
+    let embedded = extract_embedded_discussion(document, selectors, route_number);
     let body = if !embedded.body.is_empty() {
         embedded.body.clone()
     } else if is_issue {
@@ -309,21 +313,7 @@ fn render_tree_entries(heading: &str, items: &[Value]) -> String {
     strip_outer_blank_lines(&body)
 }
 
-fn render_code_fence(language: Option<&str>, code: &str) -> String {
-    let mut rendered = String::from("```");
-    if let Some(language) = language {
-        rendered.push_str(language);
-    }
-    rendered.push('\n');
-    rendered.push_str(code);
-    if !code.ends_with('\n') {
-        rendered.push('\n');
-    }
-    rendered.push_str("```");
-    rendered
-}
-
-fn select_primary_overview_file<'a>(files: &'a [Value]) -> Option<&'a Value> {
+fn select_primary_overview_file(files: &[Value]) -> Option<&Value> {
     files
         .iter()
         .find(|file| {
@@ -378,48 +368,52 @@ fn extract_rich_text_field(value: &Value) -> Option<String> {
     None
 }
 
-fn extract_embedded_discussion(document: &Html, selectors: &Selectors) -> DiscussionContent {
+fn extract_embedded_discussion(
+    document: &Html,
+    selectors: &Selectors,
+    route_number: u64,
+) -> DiscussionContent {
     let Some(payload) = embedded_payload(document, selectors) else {
         return DiscussionContent::default();
     };
-    find_discussion_record(&payload, 0).unwrap_or_default()
+    find_discussion_record(&payload, route_number).unwrap_or_default()
 }
 
-fn find_discussion_record(value: &Value, depth: usize) -> Option<DiscussionContent> {
-    if depth > 16 {
+fn find_discussion_record(payload: &Value, route_number: u64) -> Option<DiscussionContent> {
+    let queries = get_path(payload, &["payload", "preloadedQueries"])?.as_array()?;
+    queries.iter().find_map(|query| {
+        let issue = get_path(query, &["result", "data", "repository", "issue"])?;
+        extract_repository_issue_discussion(issue, route_number)
+    })
+}
+
+fn extract_repository_issue_discussion(
+    issue: &Value,
+    route_number: u64,
+) -> Option<DiscussionContent> {
+    let map = issue.as_object()?;
+    if map.get("number").and_then(Value::as_u64)? != route_number {
         return None;
     }
 
-    match value {
-        Value::Array(items) => items
-            .iter()
-            .find_map(|item| find_discussion_record(item, depth + 1)),
-        Value::Object(map) => {
-            let typename = map.get("__typename").and_then(Value::as_str);
-            if matches!(typename, Some("Issue" | "PullRequest")) {
-                let body = map
-                    .get("body")
-                    .and_then(Value::as_str)
-                    .map(normalize_multiline)
-                    .unwrap_or_default();
-                if !body.is_empty() {
-                    return Some(DiscussionContent {
-                        body,
-                        author: map.get("author").and_then(extract_discussion_author),
-                        published: map
-                            .get("createdAt")
-                            .and_then(Value::as_str)
-                            .map(normalize_inline)
-                            .filter(|value| !value.is_empty()),
-                    });
-                }
-            }
-
-            map.values()
-                .find_map(|child| find_discussion_record(child, depth + 1))
-        }
-        _ => None,
+    let body = map
+        .get("body")
+        .and_then(Value::as_str)
+        .map(normalize_multiline)
+        .unwrap_or_default();
+    if body.is_empty() {
+        return None;
     }
+
+    Some(DiscussionContent {
+        body,
+        author: map.get("author").and_then(extract_discussion_author),
+        published: map
+            .get("createdAt")
+            .and_then(Value::as_str)
+            .map(normalize_inline)
+            .filter(|value| !value.is_empty()),
+    })
 }
 
 fn extract_discussion_author(value: &Value) -> Option<String> {
@@ -509,20 +503,8 @@ fn classify_route(url: &str) -> Option<GithubRoute> {
         None => Some(GithubRoute::RepoOverview),
         Some("tree") if segments.len() >= 4 => Some(GithubRoute::Tree),
         Some("blob") if segments.len() >= 4 => Some(GithubRoute::Blob),
-        Some("issues")
-            if segments
-                .get(3)
-                .is_some_and(|segment| segment.chars().all(|ch| ch.is_ascii_digit())) =>
-        {
-            Some(GithubRoute::Issue)
-        }
-        Some("pull")
-            if segments
-                .get(3)
-                .is_some_and(|segment| segment.chars().all(|ch| ch.is_ascii_digit())) =>
-        {
-            Some(GithubRoute::Pull)
-        }
+        Some("issues") => parse_route_number(&segments).map(|number| GithubRoute::Issue { number }),
+        Some("pull") => parse_route_number(&segments).map(|number| GithubRoute::Pull { number }),
         Some("releases") => match segments.get(3).copied() {
             None => Some(GithubRoute::Releases),
             Some("latest") => Some(GithubRoute::ReleaseLatest),
@@ -531,6 +513,15 @@ fn classify_route(url: &str) -> Option<GithubRoute> {
         },
         _ => None,
     }
+}
+
+fn parse_route_number(segments: &[&str]) -> Option<u64> {
+    let segment = segments.get(3)?;
+    segment
+        .chars()
+        .all(|ch| ch.is_ascii_digit())
+        .then(|| segment.parse::<u64>().ok())
+        .flatten()
 }
 
 fn select_text(

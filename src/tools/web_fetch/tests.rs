@@ -2,8 +2,12 @@ use std::{
     collections::HashMap,
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
-    sync::Arc,
-    time::Duration,
+    sync::{
+        Arc, Condvar, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
+    thread,
+    time::{Duration, Instant},
 };
 
 use url::Url;
@@ -15,10 +19,17 @@ use super::{
     html::extract_html,
     render_cli_output,
     transport::{
-        DnsResolver, HttpTransport, TransportFailure, TransportFailureKind, TransportResponse,
-        fetch_with_clients,
+        DnsResolver, HttpTransport, ResolveBackend, ResolverPool, TransportFailure,
+        TransportFailureKind, TransportResponse, fetch_with_clients,
     },
 };
+
+const GITHUB_REPO_FIXTURE: &str = include_str!("fixtures/github/repo.html");
+const GITHUB_TREE_FIXTURE: &str = include_str!("fixtures/github/tree.html");
+const GITHUB_BLOB_FIXTURE: &str = include_str!("fixtures/github/blob.html");
+const GITHUB_ISSUE_FIXTURE: &str = include_str!("fixtures/github/issue.html");
+const GITHUB_PULL_FIXTURE: &str = include_str!("fixtures/github/pull.html");
+const GITHUB_RELEASES_FIXTURE: &str = include_str!("fixtures/github/releases.html");
 
 #[derive(Default)]
 struct FakeResolver {
@@ -189,6 +200,85 @@ fn html_output(body: &str) -> ExtractedContent {
 
 fn html_output_at_url(url: &str, body: &str) -> ExtractedContent {
     extract_html(Some(url), Some("text/html"), body, false)
+}
+
+fn fetch_body(url: &str, content_type: Option<&str>, body: &[u8]) -> FetchResult {
+    let parsed = Url::parse(url).expect("url");
+    let host = parsed.host_str().expect("host");
+    let port = parsed.port_or_known_default().expect("known port");
+    let resolver = FakeResolver::default().with_mapping(host, port, vec![socket(port)]);
+    let transport = FakeTransport::new(HashMap::from([(
+        (url.to_string(), socket(port)),
+        Ok(response(url, 200, content_type, body)),
+    )]));
+    fetch_with_clients(url, REQUEST_TIMEOUT, &resolver, &transport)
+}
+
+#[derive(Debug)]
+struct BlockingResolveBackend {
+    release: Arc<(Mutex<bool>, Condvar)>,
+    active: AtomicUsize,
+    max_active: AtomicUsize,
+    completed: AtomicUsize,
+}
+
+impl BlockingResolveBackend {
+    fn new() -> Self {
+        Self {
+            release: Arc::new((Mutex::new(false), Condvar::new())),
+            active: AtomicUsize::new(0),
+            max_active: AtomicUsize::new(0),
+            completed: AtomicUsize::new(0),
+        }
+    }
+
+    fn release_all(&self) {
+        let (lock, condvar) = &*self.release;
+        *lock.lock().expect("release lock") = true;
+        condvar.notify_all();
+    }
+}
+
+impl ResolveBackend for BlockingResolveBackend {
+    fn resolve_blocking(&self, _host: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
+        let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        update_max(&self.max_active, active);
+
+        let (lock, condvar) = &*self.release;
+        let mut released = lock.lock().expect("release lock");
+        while !*released {
+            released = condvar.wait(released).expect("release wait");
+        }
+        drop(released);
+
+        self.active.fetch_sub(1, Ordering::SeqCst);
+        self.completed.fetch_add(1, Ordering::SeqCst);
+        Ok(vec![socket(port)])
+    }
+}
+
+fn update_max(target: &AtomicUsize, value: usize) {
+    let mut current = target.load(Ordering::SeqCst);
+    while current < value {
+        match target.compare_exchange(current, value, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => return,
+            Err(next) => current = next,
+        }
+    }
+}
+
+fn wait_until<F>(timeout: Duration, condition: F)
+where
+    F: Fn() -> bool,
+{
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if condition() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(condition(), "condition was not met before timeout");
 }
 
 #[test]
@@ -817,6 +907,72 @@ fn truncation_closes_fenced_code_blocks() {
 }
 
 #[test]
+fn inline_code_uses_a_longer_delimiter_when_needed() {
+    let result = html_output(
+        r#"
+        <html>
+          <body>
+            <main>
+              <p>Use <code>foo`bar</code> now.</p>
+            </main>
+          </body>
+        </html>
+        "#,
+    );
+
+    assert!(result.content.contains("Use ``foo`bar`` now."));
+}
+
+#[test]
+fn inline_code_adds_padding_when_payload_starts_and_ends_with_backticks() {
+    let result = html_output(
+        r#"
+        <html>
+          <body>
+            <main>
+              <p><code>`quoted`</code></p>
+            </main>
+          </body>
+        </html>
+        "#,
+    );
+
+    assert!(result.content.contains("`` `quoted` ``"));
+}
+
+#[test]
+fn code_fences_grow_when_code_contains_triple_backticks() {
+    let result = html_output(
+        r#"
+        <html>
+          <body>
+            <main>
+              <pre><code class="language-md">alpha
+```
+beta</code></pre>
+            </main>
+          </body>
+        </html>
+        "#,
+    );
+
+    assert!(result.content.contains("````md\nalpha\n```\nbeta\n````"));
+}
+
+#[test]
+fn truncation_closes_the_exact_open_code_fence() {
+    let long_code = format!("{}\n```\nclosing candidate", "line\n".repeat(5000));
+    let html = format!(
+        "<html><body><main><pre><code class=\"language-md\">{}</code></pre></main></body></html>",
+        long_code
+    );
+    let extraction = extract_html(None, Some("text/html"), &html, false);
+
+    assert!(extraction.truncated);
+    assert!(extraction.content.ends_with("\n````"));
+}
+
+#[test]
 fn github_issue_embedded_data_extracts_body_author_and_published() {
     let result = html_output_at_url(
         "https://github.com/example/repo/issues/42",
@@ -835,6 +991,7 @@ fn github_issue_embedded_data_extracts_body_author_and_published() {
                         "data": {
                           "repository": {
                             "issue": {
+                              "number": 42,
                               "__typename": "Issue",
                               "body": "This issue body came from embedded GitHub data.\n\nIt should be extracted even when the visible DOM is sparse.",
                               "createdAt": "2026-02-03T04:05:06Z",
@@ -1358,6 +1515,59 @@ fn text_like_application_content_is_readable() {
 }
 
 #[test]
+fn text_plain_python_preserves_indentation() {
+    let body = "def create_app(test_config=None):\n    if test_config is None:\n        return \"default\"\n    return test_config\n";
+    let result = fetch_body(
+        "https://example.test/app.py",
+        Some("text/plain"),
+        body.as_bytes(),
+    );
+
+    assert!(result.ok);
+    assert_eq!(result.extraction_kind, super::ExtractionKind::Text);
+    assert_eq!(result.content, body);
+}
+
+#[test]
+fn text_plain_yaml_preserves_nested_spacing() {
+    let body = "jobs:\n  build:\n    steps:\n      - run: cargo test\n\n  lint:\n    steps:\n      - run: cargo clippy\n";
+    let result = fetch_body(
+        "https://example.test/workflow.yml",
+        Some("text/plain"),
+        body.as_bytes(),
+    );
+
+    assert!(result.ok);
+    assert_eq!(result.content, body);
+}
+
+#[test]
+fn text_plain_makefile_preserves_tab_indentation() {
+    let body = "all:\n\tcargo test\n";
+    let result = fetch_body(
+        "https://example.test/Makefile",
+        Some("text/plain"),
+        body.as_bytes(),
+    );
+
+    assert!(result.ok);
+    assert_eq!(result.content, body);
+}
+
+#[test]
+fn text_plain_markdown_preserves_blank_lines_and_nested_lists() {
+    let body = "# Title\n\n- item\n  - nested\n\n```rust\nfn main() {}\n```\n";
+    let result = fetch_body(
+        "https://example.test/README.md",
+        Some("text/plain"),
+        body.as_bytes(),
+    );
+
+    assert!(result.ok);
+    assert_eq!(result.content, body);
+}
+
+#[test]
 fn html_charset_decoding_handles_windows_1252() {
     let resolver = FakeResolver::default().with_mapping("example.test", 80, vec![socket(80)]);
     let body = b"<html><head><title>Caf\xe9</title></head><body><main><p>\x93Quoted\x94 caf\xe9 costs \x8010.</p></main></body></html>";
@@ -1520,4 +1730,228 @@ fn public_fetch_function_keeps_example_https_smoke_shape() {
     let result = fetch_url_with_timeout("notaurl", Duration::from_secs(1));
     assert!(!result.ok);
     assert_eq!(result.error.as_deref(), Some("invalid_url"));
+}
+
+#[test]
+fn resolver_pool_limits_concurrent_blocking_dns_work() {
+    let backend = Arc::new(BlockingResolveBackend::new());
+    let pool = ResolverPool::new(2, 4, backend.clone());
+    let handles = (0..6)
+        .map(|_| {
+            let pool = pool.clone();
+            thread::spawn(move || {
+                pool.resolve("example.test", 80, Duration::from_millis(300))
+                    .expect("dns result")
+            })
+        })
+        .collect::<Vec<_>>();
+
+    wait_until(Duration::from_millis(100), || {
+        backend.max_active.load(Ordering::SeqCst) == 2
+    });
+    backend.release_all();
+
+    for handle in handles {
+        assert_eq!(handle.join().expect("join"), vec![socket(80)]);
+    }
+    assert_eq!(backend.max_active.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn resolver_pool_times_out_when_the_queue_is_full() {
+    let backend = Arc::new(BlockingResolveBackend::new());
+    let pool = ResolverPool::new(1, 1, backend.clone());
+
+    let first_pool = pool.clone();
+    let first = thread::spawn(move || {
+        first_pool
+            .resolve("example.test", 80, Duration::from_millis(500))
+            .expect("first dns result")
+    });
+    wait_until(Duration::from_millis(100), || {
+        backend.active.load(Ordering::SeqCst) == 1
+    });
+
+    let second_pool = pool.clone();
+    let second = thread::spawn(move || {
+        second_pool
+            .resolve("example.test", 80, Duration::from_millis(500))
+            .expect("second dns result")
+    });
+    wait_until(Duration::from_millis(100), || pool.queued_requests() == 1);
+
+    let error = pool
+        .resolve("example.test", 80, Duration::from_millis(20))
+        .expect_err("queue timeout");
+    assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+
+    backend.release_all();
+    assert_eq!(first.join().expect("join"), vec![socket(80)]);
+    assert_eq!(second.join().expect("join"), vec![socket(80)]);
+}
+
+#[test]
+fn resolver_pool_drops_late_dns_completions() {
+    let backend = Arc::new(BlockingResolveBackend::new());
+    let pool = ResolverPool::new(1, 1, backend.clone());
+
+    let error = pool
+        .resolve("example.test", 80, Duration::from_millis(20))
+        .expect_err("timeout");
+    assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    assert_eq!(backend.completed.load(Ordering::SeqCst), 0);
+
+    backend.release_all();
+    wait_until(Duration::from_millis(100), || {
+        backend.completed.load(Ordering::SeqCst) == 1
+    });
+
+    assert_eq!(
+        pool.resolve("example.test", 80, Duration::from_millis(50))
+            .expect("post-timeout resolve"),
+        vec![socket(80)]
+    );
+}
+
+#[test]
+fn github_repo_fixture_extracts_real_page_overview() {
+    let result = html_output_at_url("https://github.com/rust-lang/rust", GITHUB_REPO_FIXTURE);
+
+    assert!(result.content.contains("## Top-level entries"));
+    assert!(result.content.contains("- compiler/"));
+    assert!(
+        result
+            .content
+            .contains("This is the main source code repository for Rust.")
+    );
+}
+
+#[test]
+fn github_tree_fixture_extracts_real_directory_entries() {
+    let result = html_output_at_url(
+        "https://github.com/rust-lang/rust/tree/main/compiler",
+        GITHUB_TREE_FIXTURE,
+    );
+
+    assert!(result.content.contains("## Directory entries"));
+    assert!(result.content.contains("- rustc/"));
+    assert!(result.content.contains("- rustc_abi/"));
+}
+
+#[test]
+fn github_blob_fixture_extracts_real_blob_markdown() {
+    let result = html_output_at_url(
+        "https://github.com/rust-lang/rust/blob/main/README.md",
+        GITHUB_BLOB_FIXTURE,
+    );
+
+    assert!(
+        result
+            .content
+            .contains("This is the main source code repository for Rust.")
+    );
+    assert!(result.content.contains("## Why Rust?"));
+}
+
+#[test]
+fn github_issue_fixture_targets_the_current_issue_number() {
+    let result = html_output_at_url(
+        "https://github.com/rust-lang/rust/issues/1",
+        GITHUB_ISSUE_FIXTURE,
+    );
+
+    assert!(
+        result
+            .content
+            .contains("The IL module doesn't take a session variable")
+    );
+    assert!(result.content.contains("Author: graydon"));
+    assert!(
+        !result
+            .content
+            .contains("Wrong issue body from a related item.")
+    );
+}
+
+#[test]
+fn github_pull_fixture_targets_the_current_pull_number() {
+    let result = html_output_at_url(
+        "https://github.com/rust-lang/rust/pull/140167",
+        GITHUB_PULL_FIXTURE,
+    );
+
+    assert!(result.content.contains("I tried this code:"));
+    assert!(result.content.contains("Author: bjorn3"));
+    assert!(
+        !result
+            .content
+            .contains("Wrong pull body from a related item.")
+    );
+}
+
+#[test]
+fn github_releases_fixture_extracts_the_first_real_release_section() {
+    let result = html_output_at_url(
+        "https://github.com/rust-lang/rust/releases",
+        GITHUB_RELEASES_FIXTURE,
+    );
+
+    assert!(result.content.contains("Title: 1.94.1"));
+    assert!(result.content.contains("Author: rustbot"));
+    assert!(result.content.contains("std::thread::spawn"));
+    assert!(result.content.contains("wasm32-wasip1-threads"));
+}
+
+#[test]
+#[ignore]
+fn github_live_canary_repo_page_extracts_overview() {
+    let result =
+        fetch_url_with_timeout("https://github.com/rust-lang/rust", Duration::from_secs(20));
+
+    assert!(result.ok);
+    assert_eq!(result.extraction_kind, super::ExtractionKind::HtmlPrimary);
+    assert!(result.content.contains("## Top-level entries"));
+}
+
+#[test]
+#[ignore]
+fn github_live_canary_issue_page_targets_current_issue() {
+    let result = fetch_url_with_timeout(
+        "https://github.com/rust-lang/rust/issues/1",
+        Duration::from_secs(20),
+    );
+
+    assert!(result.ok);
+    assert!(result.content.contains("Author: graydon"));
+    assert!(
+        result
+            .content
+            .contains("Thread a session or semantic context through IL")
+    );
+}
+
+#[test]
+#[ignore]
+fn github_live_canary_pull_page_targets_current_pull() {
+    let result = fetch_url_with_timeout(
+        "https://github.com/rust-lang/rust/pull/140167",
+        Duration::from_secs(20),
+    );
+
+    assert!(result.ok);
+    assert!(result.content.contains("Author: bjorn3"));
+    assert!(result.content.contains("I tried this code:"));
+}
+
+#[test]
+#[ignore]
+fn github_live_canary_release_page_extracts_notes() {
+    let result = fetch_url_with_timeout(
+        "https://github.com/rust-lang/rust/releases/latest",
+        Duration::from_secs(20),
+    );
+
+    assert!(result.ok);
+    assert!(result.content.contains("Author:"));
+    assert!(result.content.contains("Published:"));
 }

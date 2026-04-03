@@ -1,9 +1,9 @@
 use std::{
     collections::VecDeque,
     error::Error as _,
-    io::Read,
+    io::{self, Read},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs},
-    sync::mpsc,
+    sync::{Arc, Condvar, Mutex, OnceLock, mpsc},
     thread,
     time::{Duration, Instant},
 };
@@ -12,9 +12,13 @@ use ureq::OrAnyStatus;
 use url::{Host, Url};
 
 use super::{
-    CONNECT_TIMEOUT, FetchResult, MAX_ADDRESS_ATTEMPTS, MAX_DOWNLOAD_BYTES, MAX_REDIRECTS, Warning,
+    CONNECT_TIMEOUT, FailureContext, FetchResult, MAX_ADDRESS_ATTEMPTS, MAX_DOWNLOAD_BYTES,
+    MAX_REDIRECTS, Warning,
     content::{extract_content, normalize_content_type, push_warning},
 };
+
+const DNS_RESOLVER_WORKERS: usize = 4;
+const DNS_RESOLVER_QUEUE_CAPACITY: usize = 64;
 
 #[derive(Debug, Clone)]
 pub(super) struct ResolvedTarget {
@@ -49,9 +53,14 @@ pub(super) struct TransportFailure {
     pub(super) url: Option<Url>,
 }
 
+#[derive(Debug, Clone)]
+struct ResolveFailure {
+    code: &'static str,
+    final_url: Option<String>,
+}
+
 pub(super) trait DnsResolver {
-    fn resolve(&self, host: &str, port: u16, timeout: Duration)
-    -> std::io::Result<Vec<SocketAddr>>;
+    fn resolve(&self, host: &str, port: u16, timeout: Duration) -> io::Result<Vec<SocketAddr>>;
 }
 
 pub(super) trait HttpTransport {
@@ -63,37 +72,192 @@ pub(super) trait HttpTransport {
     ) -> Result<TransportResponse, TransportFailure>;
 }
 
+pub(super) trait ResolveBackend: Send + Sync {
+    fn resolve_blocking(&self, host: &str, port: u16) -> io::Result<Vec<SocketAddr>>;
+}
+
+struct SystemResolveBackend;
+
+struct ResolveRequest {
+    host: String,
+    port: u16,
+    response: mpsc::Sender<io::Result<Vec<SocketAddr>>>,
+}
+
+#[derive(Default)]
+struct ResolverPoolState {
+    requests: VecDeque<ResolveRequest>,
+}
+
+struct ResolverPoolInner {
+    backend: Arc<dyn ResolveBackend>,
+    queue_capacity: usize,
+    state: Mutex<ResolverPoolState>,
+    pending: Condvar,
+    available: Condvar,
+}
+
+#[derive(Clone)]
+pub(super) struct ResolverPool {
+    inner: Arc<ResolverPoolInner>,
+}
+
 pub(super) struct StdDnsResolver;
 pub(super) struct UreqTransport;
 
-impl DnsResolver for StdDnsResolver {
-    fn resolve(
+static DNS_RESOLVER_POOL: OnceLock<ResolverPool> = OnceLock::new();
+
+impl ResolveFailure {
+    fn new(code: &'static str, final_url: Option<String>) -> Self {
+        Self { code, final_url }
+    }
+
+    fn into_fetch_result(self, requested_url: &str) -> FetchResult {
+        FetchResult::failure(
+            requested_url,
+            self.code,
+            FailureContext {
+                final_url: self.final_url,
+                ..FailureContext::default()
+            },
+        )
+    }
+}
+
+impl ResolveBackend for SystemResolveBackend {
+    fn resolve_blocking(&self, host: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
+        (host, port).to_socket_addrs().map(|iter| iter.collect())
+    }
+}
+
+impl ResolverPool {
+    pub(super) fn new(
+        worker_count: usize,
+        queue_capacity: usize,
+        backend: Arc<dyn ResolveBackend>,
+    ) -> Self {
+        let inner = Arc::new(ResolverPoolInner {
+            backend,
+            queue_capacity: queue_capacity.max(1),
+            state: Mutex::new(ResolverPoolState::default()),
+            pending: Condvar::new(),
+            available: Condvar::new(),
+        });
+
+        for worker_index in 0..worker_count.max(1) {
+            let worker_inner = Arc::clone(&inner);
+            thread::Builder::new()
+                .name(format!("headless-dns-{worker_index}"))
+                .spawn(move || resolver_worker(worker_inner))
+                .expect("spawn dns resolver worker");
+        }
+
+        Self { inner }
+    }
+
+    pub(super) fn resolve(
         &self,
         host: &str,
         port: u16,
         timeout: Duration,
-    ) -> std::io::Result<Vec<SocketAddr>> {
-        let host = host.to_string();
-        let worker_host = host.clone();
-        let (sender, receiver) = mpsc::channel();
-        thread::spawn(move || {
-            let result = (worker_host.as_str(), port)
-                .to_socket_addrs()
-                .map(|iter| iter.collect());
-            let _ = sender.send(result);
-        });
+    ) -> io::Result<Vec<SocketAddr>> {
+        let deadline = Instant::now() + timeout;
+        let (response_tx, response_rx) = mpsc::channel();
+        self.enqueue(
+            ResolveRequest {
+                host: host.to_string(),
+                port,
+                response: response_tx,
+            },
+            deadline,
+        )?;
 
-        match receiver.recv_timeout(timeout) {
+        let Some(remaining) = remaining_timeout(deadline) else {
+            return Err(timeout_error(host));
+        };
+
+        match response_rx.recv_timeout(remaining) {
             Ok(result) => result,
-            Err(mpsc::RecvTimeoutError::Timeout) => Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                format!("dns lookup timed out for `{host}`"),
-            )),
-            Err(mpsc::RecvTimeoutError::Disconnected) => Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("dns lookup worker disconnected for `{host}`"),
-            )),
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(timeout_error(host)),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(io::Error::other(format!(
+                "dns lookup worker disconnected for `{host}`"
+            ))),
         }
+    }
+
+    fn enqueue(&self, request: ResolveRequest, deadline: Instant) -> io::Result<()> {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .expect("dns resolver queue lock poisoned");
+        while state.requests.len() >= self.inner.queue_capacity {
+            let Some(remaining) = remaining_timeout(deadline) else {
+                return Err(timeout_error(&request.host));
+            };
+            let (next_state, wait_result) = self
+                .inner
+                .available
+                .wait_timeout(state, remaining)
+                .expect("dns resolver queue wait poisoned");
+            state = next_state;
+            if wait_result.timed_out() && state.requests.len() >= self.inner.queue_capacity {
+                return Err(timeout_error(&request.host));
+            }
+        }
+
+        state.requests.push_back(request);
+        self.inner.pending.notify_one();
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(super) fn queued_requests(&self) -> usize {
+        self.inner
+            .state
+            .lock()
+            .expect("dns resolver queue lock poisoned")
+            .requests
+            .len()
+    }
+}
+
+fn dns_resolver_pool() -> &'static ResolverPool {
+    DNS_RESOLVER_POOL.get_or_init(|| {
+        ResolverPool::new(
+            DNS_RESOLVER_WORKERS,
+            DNS_RESOLVER_QUEUE_CAPACITY,
+            Arc::new(SystemResolveBackend),
+        )
+    })
+}
+
+fn resolver_worker(inner: Arc<ResolverPoolInner>) {
+    loop {
+        let request = {
+            let mut state = inner
+                .state
+                .lock()
+                .expect("dns resolver queue lock poisoned");
+            while state.requests.is_empty() {
+                state = inner
+                    .pending
+                    .wait(state)
+                    .expect("dns resolver queue wait poisoned");
+            }
+            let request = state.requests.pop_front().expect("queued dns request");
+            inner.available.notify_one();
+            request
+        };
+
+        let result = inner.backend.resolve_blocking(&request.host, request.port);
+        let _ = request.response.send(result);
+    }
+}
+
+impl DnsResolver for StdDnsResolver {
+    fn resolve(&self, host: &str, port: u16, timeout: Duration) -> io::Result<Vec<SocketAddr>> {
+        dns_resolver_pool().resolve(host, port, timeout)
     }
 }
 
@@ -174,7 +338,7 @@ pub(super) fn fetch_with_clients(
     let deadline = Instant::now() + timeout;
     let mut current = match resolve_target(requested_url, resolver, deadline) {
         Ok(target) => target,
-        Err(result) => return result,
+        Err(error) => return error.into_fetch_result(requested_url),
     };
 
     let mut redirects_followed = 0usize;
@@ -188,70 +352,43 @@ pub(super) fn fetch_with_clients(
                     .or_else(|| Some(current.url.to_string()));
                 return FetchResult::failure(
                     requested_url,
-                    final_url,
-                    None,
-                    None,
-                    String::new(),
-                    Vec::new(),
                     transport_error_code(error.kind),
-                    false,
-                    0,
+                    FailureContext {
+                        final_url,
+                        ..FailureContext::default()
+                    },
                 );
             }
         };
 
         if is_redirect_status(response.status) {
+            let redirect_context = FailureContext {
+                final_url: Some(response.url.to_string()),
+                status: Some(response.status),
+                content_type: normalize_content_type(response.content_type.as_deref()),
+                bytes_read: response.bytes_read,
+                ..FailureContext::default()
+            };
             if redirects_followed >= MAX_REDIRECTS {
-                return FetchResult::failure(
-                    requested_url,
-                    Some(response.url.to_string()),
-                    Some(response.status),
-                    normalize_content_type(response.content_type.as_deref()),
-                    String::new(),
-                    Vec::new(),
-                    "redirect_error",
-                    false,
-                    response.bytes_read,
-                );
+                return FetchResult::failure(requested_url, "redirect_error", redirect_context);
             }
             let Some(location) = response.location.as_deref() else {
-                return FetchResult::failure(
-                    requested_url,
-                    Some(response.url.to_string()),
-                    Some(response.status),
-                    normalize_content_type(response.content_type.as_deref()),
-                    String::new(),
-                    Vec::new(),
-                    "redirect_error",
-                    false,
-                    response.bytes_read,
-                );
+                return FetchResult::failure(requested_url, "redirect_error", redirect_context);
             };
             let next_url = match response.url.join(location) {
                 Ok(url) => url,
                 Err(_) => {
-                    return FetchResult::failure(
-                        requested_url,
-                        Some(response.url.to_string()),
-                        Some(response.status),
-                        normalize_content_type(response.content_type.as_deref()),
-                        String::new(),
-                        Vec::new(),
-                        "redirect_error",
-                        false,
-                        response.bytes_read,
-                    );
+                    return FetchResult::failure(requested_url, "redirect_error", redirect_context);
                 }
             };
             current = match resolve_target_url(
                 next_url,
                 resolver,
-                requested_url,
                 Some(response.url.to_string()),
                 deadline,
             ) {
                 Ok(target) => target,
-                Err(result) => return result,
+                Err(error) => return error.into_fetch_result(requested_url),
             };
             redirects_followed += 1;
             continue;
@@ -291,6 +428,13 @@ fn remaining_timeout(deadline: Instant) -> Option<Duration> {
     deadline.checked_duration_since(Instant::now())
 }
 
+fn timeout_error(host: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::TimedOut,
+        format!("dns lookup timed out for `{host}`"),
+    )
+}
+
 fn should_retry_address(kind: TransportFailureKind) -> bool {
     matches!(
         kind,
@@ -306,8 +450,8 @@ fn candidate_addresses(addresses: &[SocketAddr]) -> Vec<SocketAddr> {
         }
     }
 
-    if unique.len() <= MAX_ADDRESS_ATTEMPTS && unique.iter().all(|addr| addr.is_ipv4())
-        || unique.iter().all(|addr| addr.is_ipv6())
+    if unique.len() <= MAX_ADDRESS_ATTEMPTS
+        && (unique.iter().all(|addr| addr.is_ipv4()) || unique.iter().all(|addr| addr.is_ipv6()))
     {
         unique.truncate(MAX_ADDRESS_ATTEMPTS);
         return unique;
@@ -391,75 +535,29 @@ fn resolve_target(
     input: &str,
     resolver: &dyn DnsResolver,
     deadline: Instant,
-) -> Result<ResolvedTarget, FetchResult> {
-    let url = match Url::parse(input) {
-        Ok(url) => url,
-        Err(_) => {
-            return Err(FetchResult::failure(
-                input,
-                None,
-                None,
-                None,
-                String::new(),
-                Vec::new(),
-                "invalid_url",
-                false,
-                0,
-            ));
-        }
-    };
-    resolve_target_url(url, resolver, input, None, deadline)
+) -> Result<ResolvedTarget, ResolveFailure> {
+    let url = Url::parse(input).map_err(|_| ResolveFailure::new("invalid_url", None))?;
+    resolve_target_url(url, resolver, None, deadline)
 }
 
 fn resolve_target_url(
     url: Url,
     resolver: &dyn DnsResolver,
-    requested_url: &str,
     final_url: Option<String>,
     deadline: Instant,
-) -> Result<ResolvedTarget, FetchResult> {
+) -> Result<ResolvedTarget, ResolveFailure> {
     if !matches!(url.scheme(), "http" | "https") {
-        return Err(FetchResult::failure(
-            requested_url,
-            final_url,
-            None,
-            None,
-            String::new(),
-            Vec::new(),
-            "unsupported_scheme",
-            false,
-            0,
-        ));
+        return Err(ResolveFailure::new("unsupported_scheme", final_url));
     }
 
     let Some(host) = url.host() else {
-        return Err(FetchResult::failure(
-            requested_url,
-            final_url,
-            None,
-            None,
-            String::new(),
-            Vec::new(),
-            "invalid_url",
-            false,
-            0,
-        ));
+        return Err(ResolveFailure::new("invalid_url", final_url));
     };
     let port = url.port_or_known_default().unwrap_or(80);
     let host_string = host.to_string();
 
     if matches!(host, Host::Domain(_)) && is_blocked_hostname(&host_string) {
-        return Err(FetchResult::failure(
-            requested_url,
-            final_url,
-            None,
-            None,
-            String::new(),
-            Vec::new(),
-            "blocked_address",
-            false,
-            0,
-        ));
+        return Err(ResolveFailure::new("blocked_address", final_url));
     }
 
     let addresses = match host {
@@ -467,62 +565,20 @@ fn resolve_target_url(
         Host::Ipv6(addr) => vec![SocketAddr::new(IpAddr::V6(addr), port)],
         Host::Domain(_) => {
             let Some(timeout) = remaining_timeout(deadline) else {
-                return Err(FetchResult::failure(
-                    requested_url,
-                    final_url,
-                    None,
-                    None,
-                    String::new(),
-                    Vec::new(),
-                    "timeout",
-                    false,
-                    0,
-                ));
+                return Err(ResolveFailure::new("timeout", final_url));
             };
             match resolver.resolve(&host_string, port, timeout) {
                 Ok(addresses) if !addresses.is_empty() => addresses,
-                Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {
-                    return Err(FetchResult::failure(
-                        requested_url,
-                        final_url,
-                        None,
-                        None,
-                        String::new(),
-                        Vec::new(),
-                        "timeout",
-                        false,
-                        0,
-                    ));
+                Err(error) if error.kind() == io::ErrorKind::TimedOut => {
+                    return Err(ResolveFailure::new("timeout", final_url));
                 }
-                _ => {
-                    return Err(FetchResult::failure(
-                        requested_url,
-                        final_url,
-                        None,
-                        None,
-                        String::new(),
-                        Vec::new(),
-                        "dns_error",
-                        false,
-                        0,
-                    ));
-                }
+                _ => return Err(ResolveFailure::new("dns_error", final_url)),
             }
         }
     };
 
     if addresses.iter().any(|value| is_blocked_ip(value.ip())) {
-        return Err(FetchResult::failure(
-            requested_url,
-            final_url,
-            None,
-            None,
-            String::new(),
-            Vec::new(),
-            "blocked_address",
-            false,
-            0,
-        ));
+        return Err(ResolveFailure::new("blocked_address", final_url));
     }
 
     Ok(ResolvedTarget { url, addresses })
@@ -533,7 +589,7 @@ fn is_redirect_status(status: u16) -> bool {
 }
 
 fn map_transport_error(error: ureq::Transport, fallback_url: Option<Url>) -> TransportFailure {
-    use std::io::ErrorKind;
+    use io::ErrorKind;
     use ureq::ErrorKind as UreqErrorKind;
 
     let kind = match error.kind() {
@@ -546,9 +602,9 @@ fn map_transport_error(error: ureq::Transport, fallback_url: Option<Url>) -> Tra
         UreqErrorKind::Io => match error
             .source()
             .and_then(|source: &(dyn std::error::Error + 'static)| {
-                source.downcast_ref::<std::io::Error>()
+                source.downcast_ref::<io::Error>()
             })
-            .map(std::io::Error::kind)
+            .map(io::Error::kind)
         {
             Some(ErrorKind::TimedOut) | Some(ErrorKind::WouldBlock) => {
                 TransportFailureKind::Timeout
@@ -563,8 +619,8 @@ fn map_transport_error(error: ureq::Transport, fallback_url: Option<Url>) -> Tra
     }
 }
 
-fn map_read_error(error: std::io::Error, url: Option<Url>) -> TransportFailure {
-    use std::io::ErrorKind;
+fn map_read_error(error: io::Error, url: Option<Url>) -> TransportFailure {
+    use io::ErrorKind;
     let kind = match error.kind() {
         ErrorKind::TimedOut | ErrorKind::WouldBlock => TransportFailureKind::Timeout,
         _ => TransportFailureKind::Decode,

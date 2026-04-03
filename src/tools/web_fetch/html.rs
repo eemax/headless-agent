@@ -9,7 +9,7 @@ use super::{
         ExtractedContent, normalize_content_type, normalize_inline, push_warning, truncate_chars,
         warning_list,
     },
-    render::{render_root, strip_outer_blank_lines},
+    render::{render_root, strip_outer_blank_lines, unmatched_markdown_code_fence},
     sites::{self, SiteExtraction},
 };
 
@@ -244,16 +244,15 @@ fn merge_schema_info(info: &mut SchemaInfo, value: &Value, depth: usize) {
             }
         }
         Value::Object(map) => {
-            if info.text.is_none() {
-                if let Some(text) = map
+            if info.text.is_none()
+                && let Some(text) = map
                     .get("articleBody")
                     .and_then(json_string)
                     .or_else(|| map.get("text").and_then(json_string))
-                {
-                    let text = normalize_schema_text(&text);
-                    if is_useful_schema_text(&text) {
-                        info.text = Some(text);
-                    }
+            {
+                let text = normalize_schema_text(&text);
+                if is_useful_schema_text(&text) {
+                    info.text = Some(text);
                 }
             }
             if info.title.is_none() {
@@ -439,22 +438,13 @@ fn truncate_rendered_content(input: &str, limit: usize) -> (String, bool) {
     if !truncated {
         return (output, false);
     }
-    if has_unclosed_code_fence(&output) {
+    if let Some(fence) = unmatched_markdown_code_fence(&output) {
         if !output.ends_with('\n') {
             output.push('\n');
         }
-        output.push_str("```");
+        output.push_str(&fence);
     }
     (output, true)
-}
-
-fn has_unclosed_code_fence(input: &str) -> bool {
-    input
-        .lines()
-        .filter(|line| line.trim_start().starts_with("```"))
-        .count()
-        % 2
-        == 1
 }
 
 fn select_root<'a>(document: &'a Html, selectors: &'a Selectors) -> RootSelection<'a> {

@@ -49,20 +49,17 @@ pub(super) fn extract_content(
 
 fn extract_json(body: &[u8], body_truncated: bool) -> ExtractedContent {
     let content_type = Some("application/json".to_string());
-    if !body_truncated {
-        if let Ok(value) = serde_json::from_slice::<Value>(body) {
-            let rendered =
-                serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
-            let (content, content_truncated) = truncate_chars(&rendered, MAX_CONTENT_CHARS);
-            return ExtractedContent {
-                kind: ExtractionKind::Json,
-                content_type,
-                content,
-                warnings: warning_list(content_truncated),
-                truncated: content_truncated,
-                error: None,
-            };
-        }
+    if !body_truncated && let Ok(value) = serde_json::from_slice::<Value>(body) {
+        let rendered = serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
+        let (content, content_truncated) = truncate_chars(&rendered, MAX_CONTENT_CHARS);
+        return ExtractedContent {
+            kind: ExtractionKind::Json,
+            content_type,
+            content,
+            warnings: warning_list(content_truncated),
+            truncated: content_truncated,
+            error: None,
+        };
     }
 
     let rendered = String::from_utf8_lossy(body).to_string();
@@ -204,10 +201,9 @@ fn detect_encoding(
         sniff_html_meta
             .then(|| charset_from_html_meta(body))
             .flatten()
-    }) {
-        if let Some(encoding) = Encoding::for_label(label.as_bytes()) {
-            return encoding;
-        }
+    }) && let Some(encoding) = Encoding::for_label(label.as_bytes())
+    {
+        return encoding;
     }
 
     if std::str::from_utf8(body).is_ok() {
@@ -254,7 +250,7 @@ fn extract_charset_assignment(tag: &str) -> Option<String> {
         let charset = value
             .trim_start()
             .trim_matches(|ch: char| matches!(ch, '"' | '\'' | ' ' | '\t'))
-            .split(|ch: char| matches!(ch, '"' | '\'' | ';' | ' ' | '\t' | '>'))
+            .split(['"', '\'', ';', ' ', '\t', '>'])
             .next()
             .unwrap_or("");
         if !charset.is_empty() {
@@ -333,32 +329,16 @@ pub(super) fn normalize_inline(input: &str) -> String {
 }
 
 fn normalize_text_body(input: &str) -> String {
-    let mut lines = Vec::new();
-    let mut previous_blank = false;
-    for raw_line in input.lines() {
-        let line = raw_line.trim();
-        if line.is_empty() {
-            if !previous_blank && !lines.is_empty() {
-                lines.push(String::new());
-            }
-            previous_blank = true;
-            continue;
-        }
-        lines.push(normalize_inline(line));
-        previous_blank = false;
-    }
-    lines.join("\n")
+    input.replace("\r\n", "\n").replace('\r', "\n")
 }
 
 pub(super) fn truncate_chars(input: &str, limit: usize) -> (String, bool) {
-    let mut count = 0usize;
     let mut output = String::new();
-    for ch in input.chars() {
+    for (count, ch) in input.chars().enumerate() {
         if count == limit {
             return (output, true);
         }
         output.push(ch);
-        count += 1;
     }
     (output, false)
 }

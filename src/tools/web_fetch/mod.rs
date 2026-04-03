@@ -147,6 +147,17 @@ pub enum Warning {
     ContentTruncated,
 }
 
+#[derive(Debug, Default, Clone)]
+pub(super) struct FailureContext {
+    pub(super) final_url: Option<String>,
+    pub(super) status: Option<u16>,
+    pub(super) content_type: Option<String>,
+    pub(super) content: String,
+    pub(super) warnings: Vec<Warning>,
+    pub(super) truncated: bool,
+    pub(super) bytes_read: u64,
+}
+
 impl ExtractionKind {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -172,29 +183,19 @@ impl Warning {
 }
 
 impl FetchResult {
-    fn failure(
-        requested_url: &str,
-        final_url: Option<String>,
-        status: Option<u16>,
-        content_type: Option<String>,
-        content: String,
-        warnings: Vec<Warning>,
-        error: &str,
-        truncated: bool,
-        bytes_read: u64,
-    ) -> Self {
+    fn failure(requested_url: &str, error: &str, context: FailureContext) -> Self {
         Self {
             ok: false,
             requested_url: requested_url.to_string(),
-            final_url,
-            status,
-            content_type,
-            content,
+            final_url: context.final_url,
+            status: context.status,
+            content_type: context.content_type,
+            content: context.content,
             extraction_kind: ExtractionKind::Error,
-            warnings,
+            warnings: context.warnings,
             error: Some(error.to_string()),
-            truncated,
-            bytes_read,
+            truncated: context.truncated,
+            bytes_read: context.bytes_read,
         }
     }
 }

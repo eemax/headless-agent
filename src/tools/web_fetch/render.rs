@@ -69,6 +69,52 @@ pub(super) fn render_html_fragment(html: &str) -> String {
     render_element_blocks(document.root_element())
 }
 
+pub(super) fn render_markdown_inline_code(code: &str) -> String {
+    let delimiter = backtick_delimiter(code, 1);
+    let needs_padding = code.starts_with('`')
+        || code.ends_with('`')
+        || code.starts_with(' ')
+        || code.ends_with(' ');
+    if needs_padding {
+        format!("{delimiter} {code} {delimiter}")
+    } else {
+        format!("{delimiter}{code}{delimiter}")
+    }
+}
+
+pub(super) fn render_markdown_code_block(language: Option<&str>, code: &str) -> String {
+    let delimiter = backtick_delimiter(code, 3);
+    let mut rendered = delimiter.clone();
+    if let Some(language) = language {
+        rendered.push_str(language);
+    }
+    rendered.push('\n');
+    rendered.push_str(code);
+    if !code.ends_with('\n') {
+        rendered.push('\n');
+    }
+    rendered.push_str(&delimiter);
+    rendered
+}
+
+pub(super) fn unmatched_markdown_code_fence(input: &str) -> Option<String> {
+    let mut open_fence: Option<String> = None;
+    for line in input.lines() {
+        let trimmed = line.trim_start();
+        if let Some(fence) = &open_fence {
+            if is_closing_code_fence(trimmed, fence) {
+                open_fence = None;
+            }
+            continue;
+        }
+
+        if let Some(fence) = opening_code_fence(trimmed) {
+            open_fence = Some(fence.to_string());
+        }
+    }
+    open_fence
+}
+
 pub(super) fn strip_outer_blank_lines(input: &str) -> String {
     let normalized = input.replace("\r\n", "\n").replace('\r', "\n");
     let lines = normalized.lines().collect::<Vec<_>>();
@@ -292,9 +338,7 @@ fn render_inline_tokens(tokens: &[InlineToken]) -> String {
                 if pending_space && !output.is_empty() && !output.ends_with('\n') {
                     output.push(' ');
                 }
-                output.push('`');
-                output.push_str(code);
-                output.push('`');
+                output.push_str(&render_markdown_inline_code(code));
                 pending_space = false;
             }
             InlineToken::Break => {
@@ -318,6 +362,35 @@ fn trim_trailing_spaces(value: &mut String) {
 
 fn normalize_inline_code(input: &str) -> String {
     input.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn backtick_delimiter(input: &str, minimum_len: usize) -> String {
+    "`".repeat(longest_backtick_run(input).max(minimum_len.saturating_sub(1)) + 1)
+}
+
+fn longest_backtick_run(input: &str) -> usize {
+    let mut longest = 0usize;
+    let mut current = 0usize;
+    for ch in input.chars() {
+        if ch == '`' {
+            current += 1;
+            longest = longest.max(current);
+        } else {
+            current = 0;
+        }
+    }
+    longest
+}
+
+fn opening_code_fence(line: &str) -> Option<&str> {
+    let count = line.chars().take_while(|ch| *ch == '`').count();
+    (count >= 3).then_some(&line[..count])
+}
+
+fn is_closing_code_fence(line: &str, fence: &str) -> bool {
+    let trimmed = line.trim();
+    let count = trimmed.chars().take_while(|ch| *ch == '`').count();
+    count >= fence.len() && trimmed.chars().all(|ch| ch == '`')
 }
 
 fn has_meaningful_block_children(element: &ElementRef<'_>) -> bool {
@@ -733,14 +806,7 @@ fn render_block(block: &HtmlBlock) -> String {
         HtmlBlock::Paragraph(text) => text.clone(),
         HtmlBlock::List { ordered, items } => render_list(*ordered, items, 0),
         HtmlBlock::CodeFence { language, code } => {
-            let mut rendered = String::from("```");
-            if let Some(language) = language {
-                rendered.push_str(language);
-            }
-            rendered.push('\n');
-            rendered.push_str(code);
-            rendered.push_str("\n```");
-            rendered
+            render_markdown_code_block(language.as_deref(), code)
         }
         HtmlBlock::Blockquote(blocks) => {
             let rendered = render_blocks(blocks);
@@ -861,10 +927,10 @@ fn is_noisy_element(element: &ElementRef<'_>) -> bool {
         return true;
     }
 
-    if let Some(value) = element.value().attr("aria-hidden") {
-        if value.eq_ignore_ascii_case("true") {
-            return true;
-        }
+    if let Some(value) = element.value().attr("aria-hidden")
+        && value.eq_ignore_ascii_case("true")
+    {
+        return true;
     }
 
     if let Some(value) = element.value().attr("role") {
@@ -874,10 +940,10 @@ fn is_noisy_element(element: &ElementRef<'_>) -> bool {
         }
     }
 
-    if let Some(value) = element.value().attr("style") {
-        if style_hides_element(value) {
-            return true;
-        }
+    if let Some(value) = element.value().attr("style")
+        && style_hides_element(value)
+    {
+        return true;
     }
 
     if has_hidden_utility_class(element) {
@@ -885,10 +951,10 @@ fn is_noisy_element(element: &ElementRef<'_>) -> bool {
     }
 
     for attr in ["class", "id"] {
-        if let Some(value) = element.value().attr(attr) {
-            if has_noisy_attribute_token(value) {
-                return true;
-            }
+        if let Some(value) = element.value().attr(attr)
+            && has_noisy_attribute_token(value)
+        {
+            return true;
         }
     }
 
