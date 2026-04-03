@@ -119,7 +119,11 @@ fn response(url: &str, status: u16, content_type: Option<&str>, body: &[u8]) -> 
 }
 
 fn html_output(body: &str) -> ExtractedContent {
-    extract_html(Some("text/html"), body.as_bytes(), false)
+    extract_html(None, Some("text/html"), body, false)
+}
+
+fn html_output_at_url(url: &str, body: &str) -> ExtractedContent {
+    extract_html(Some(url), Some("text/html"), body, false)
 }
 
 #[test]
@@ -313,6 +317,122 @@ fn metadata_fallbacks_and_crumb_filters_are_deterministic() {
 }
 
 #[test]
+fn schema_fallback_replaces_low_signal_dom_content() {
+    let result = html_output(
+        r#"
+        <html>
+          <head>
+            <title>JS App</title>
+            <script type="application/ld+json">
+              {
+                "@context": "https://schema.org",
+                "@type": "Article",
+                "headline": "Recovered article",
+                "articleBody": "This article body came from schema.org and includes enough text to replace a shell page that would otherwise look empty to the extractor."
+              }
+            </script>
+          </head>
+          <body>
+            <div id="__next"></div>
+          </body>
+        </html>
+        "#,
+    );
+
+    assert!(result.content.contains("This article body came from schema.org"));
+    assert!(!result.warnings.contains(&Warning::LowSignalExtraction));
+    assert!(!result.warnings.contains(&Warning::PossibleJsRenderedPage));
+}
+
+#[test]
+fn schema_fallback_does_not_override_healthy_dom_content() {
+    let result = html_output(
+        r#"
+        <html>
+          <head>
+            <title>Healthy page</title>
+            <script type="application/ld+json">
+              {
+                "@context": "https://schema.org",
+                "@type": "Article",
+                "articleBody": "Schema fallback text that should not replace the visible article because the DOM extraction is already healthy and complete."
+              }
+            </script>
+          </head>
+          <body>
+            <main>
+              <p>This visible article content is already healthy, readable, and long enough that schema fallback should stay unused.</p>
+              <p>The extractor should preserve this DOM-first result rather than swapping in alternate schema text.</p>
+            </main>
+          </body>
+        </html>
+        "#,
+    );
+
+    assert!(result.content.contains("This visible article content is already healthy"));
+    assert!(!result.content.contains("Schema fallback text that should not replace"));
+}
+
+#[test]
+fn author_and_published_metadata_are_rendered_only_when_present() {
+    let with_metadata = html_output(
+        r#"
+        <html>
+          <head>
+            <meta name="author" content="Jane Doe" />
+            <meta property="article:published_time" content="2026-02-01T09:30:00Z" />
+          </head>
+          <body>
+            <main>
+              <p>Useful content lives here.</p>
+            </main>
+          </body>
+        </html>
+        "#,
+    );
+    assert!(with_metadata.content.contains("Author: Jane Doe"));
+    assert!(with_metadata.content.contains("Published: 2026-02-01T09:30:00Z"));
+
+    let without_metadata = html_output(
+        r#"
+        <html>
+          <body>
+            <main>
+              <p>Useful content lives here too.</p>
+            </main>
+          </body>
+        </html>
+        "#,
+    );
+    assert!(!without_metadata.content.contains("Author:"));
+    assert!(!without_metadata.content.contains("Published:"));
+}
+
+#[test]
+fn hidden_utility_classes_and_source_crumbs_are_removed() {
+    let result = html_output(
+        r#"
+        <html>
+          <body>
+            <main>
+              <div class="hidden">secret</div>
+              <div class="sm:hidden">also secret</div>
+              <div class="invisible">ghost</div>
+              <p>Source</p>
+              <p>Keep this paragraph.</p>
+            </main>
+          </body>
+        </html>
+        "#,
+    );
+
+    assert!(result.content.contains("Keep this paragraph."));
+    assert!(!result.content.contains("secret"));
+    assert!(!result.content.contains("ghost"));
+    assert!(!result.content.contains("\nSource\n"));
+}
+
+#[test]
 fn nested_lists_render_with_indentation() {
     let result = html_output(
         r#"
@@ -470,11 +590,82 @@ fn truncation_closes_fenced_code_blocks() {
         "<html><body><main><pre><code>{}</code></pre></main></body></html>",
         long_code
     );
-    let extraction = extract_html(Some("text/html"), html.as_bytes(), false);
+    let extraction = extract_html(None, Some("text/html"), &html, false);
 
     assert!(extraction.truncated);
     assert!(extraction.warnings.contains(&Warning::ContentTruncated));
     assert!(extraction.content.ends_with("\n```"));
+}
+
+#[test]
+fn github_issue_embedded_data_extracts_body_author_and_published() {
+    let result = html_output_at_url(
+        "https://github.com/example/repo/issues/42",
+        r#"
+        <html>
+          <head>
+            <title>Embedded issue</title>
+          </head>
+          <body>
+            <script type="application/json" data-target="react-app.embeddedData">
+              {
+                "payload": {
+                  "preloadedQueries": [
+                    {
+                      "result": {
+                        "data": {
+                          "repository": {
+                            "issue": {
+                              "__typename": "Issue",
+                              "body": "This issue body came from embedded GitHub data.\n\nIt should be extracted even when the visible DOM is sparse.",
+                              "createdAt": "2026-02-03T04:05:06Z",
+                              "author": { "login": "octocat" }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            </script>
+            <div id="repo-content-pjax-container"></div>
+          </body>
+        </html>
+        "#,
+    );
+
+    assert!(result.content.contains("This issue body came from embedded GitHub data."));
+    assert!(result.content.contains("Author: octocat"));
+    assert!(result.content.contains("Published: 2026-02-03T04:05:06Z"));
+}
+
+#[test]
+fn github_pr_visible_body_fallback_extracts_body_author_and_published() {
+    let result = html_output_at_url(
+        "https://github.com/example/repo/pull/7",
+        r#"
+        <html>
+          <body>
+            <div class="gh-header-meta">
+              <a class="author" href="/octocat">octocat</a>
+            </div>
+            <relative-time datetime="2026-03-04T05:06:07Z"></relative-time>
+            <div class="timeline-comment">
+              <div class="comment-body markdown-body">
+                <p>Fix the flaky test by waiting for the worker to finish.</p>
+                <pre><code class="language-rust">assert!(done);</code></pre>
+              </div>
+            </div>
+          </body>
+        </html>
+        "#,
+    );
+
+    assert!(result.content.contains("Fix the flaky test by waiting for the worker to finish."));
+    assert!(result.content.contains("```rust\nassert!(done);\n```"));
+    assert!(result.content.contains("Author: octocat"));
+    assert!(result.content.contains("Published: 2026-03-04T05:06:07Z"));
 }
 
 #[test]
@@ -546,6 +737,30 @@ fn text_like_application_content_is_readable() {
     assert!(result.ok);
     assert_eq!(result.extraction_kind, super::ExtractionKind::Text);
     assert!(result.content.contains("console.log(\"hello\");"));
+}
+
+#[test]
+fn html_charset_decoding_handles_windows_1252() {
+    let resolver = FakeResolver::default().with_mapping("example.test", 80, vec![socket(80)]);
+    let body = b"<html><head><title>Caf\xe9</title></head><body><main><p>\x93Quoted\x94 caf\xe9 costs \x8010.</p></main></body></html>";
+    let transport = FakeTransport::new(HashMap::from([(
+        ("http://example.test/latin1".to_string(), socket(80)),
+        Ok(response(
+            "http://example.test/latin1",
+            200,
+            Some("text/html; charset=windows-1252"),
+            body,
+        )),
+    )]));
+    let result = fetch_with_clients(
+        "http://example.test/latin1",
+        REQUEST_TIMEOUT,
+        &resolver,
+        &transport,
+    );
+
+    assert!(result.content.contains("Title: Café"));
+    assert!(result.content.contains("“Quoted” café costs €10."));
 }
 
 #[test]

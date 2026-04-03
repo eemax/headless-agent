@@ -1,6 +1,8 @@
 use std::sync::OnceLock;
 
 use scraper::{ElementRef, Html, Selector};
+use serde_json::Value;
+use url::Url;
 
 use super::{
     ExtractionKind, MIN_CONTENT_CHARS, NOISY_TAGS, NOISY_TOKEN_SUBSTRINGS, Warning,
@@ -21,6 +23,24 @@ struct Selectors {
     meta_twitter_description: Selector,
     meta_og_title: Selector,
     meta_twitter_title: Selector,
+    meta_author_name: Selector,
+    meta_author_property: Selector,
+    meta_article_author: Selector,
+    meta_published_name: Selector,
+    meta_published_property: Selector,
+    schema_json: Selector,
+    time_datetime: Selector,
+    rel_author: Selector,
+    itemprop_author: Selector,
+    class_author: Selector,
+    class_byline: Selector,
+    github_embedded_data: Selector,
+    github_issue_container: Selector,
+    github_issue_body: Selector,
+    github_issue_author: Selector,
+    github_pr_body: Selector,
+    github_pr_author: Selector,
+    github_relative_time: Selector,
     main: Selector,
     article: Selector,
     role_main: Selector,
@@ -35,6 +55,24 @@ struct HtmlMetadata {
     title: Option<String>,
     h1: Option<String>,
     description: Option<String>,
+    author: Option<String>,
+    published: Option<String>,
+}
+
+#[derive(Debug, Default, Clone)]
+struct SchemaInfo {
+    title: Option<String>,
+    description: Option<String>,
+    author: Option<String>,
+    published: Option<String>,
+    text: Option<String>,
+}
+
+#[derive(Debug, Default, Clone)]
+struct GithubContent {
+    body: String,
+    author: Option<String>,
+    published: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,8 +123,9 @@ struct RootSelection<'a> {
 }
 
 pub(super) fn extract_html(
+    source_url: Option<&str>,
     content_type_header: Option<&str>,
-    body: &[u8],
+    html: &str,
     body_truncated: bool,
 ) -> ExtractedContent {
     let selectors = match selectors() {
@@ -104,10 +143,11 @@ pub(super) fn extract_html(
         }
     };
 
-    let html = String::from_utf8_lossy(body).to_string();
-    let document = Html::parse_document(&html);
+    let document = Html::parse_document(html);
+    let schema = extract_schema_info(&document, selectors);
     let root = select_root(&document, selectors);
-    let metadata = extract_metadata(&document, selectors);
+    let github = extract_github_content(source_url, &document, selectors, &schema);
+    let metadata = extract_metadata(&document, selectors, &root, &schema, github.as_ref());
 
     let displayed_title = metadata
         .title
@@ -119,12 +159,25 @@ pub(super) fn extract_html(
         suppress_duplicate_title_heading(&mut blocks, title);
     }
     let body_visible_text_len = visible_text_len(&blocks);
-    let body_text = render_blocks(&blocks);
-    let low_signal = is_low_signal_extraction(&body_text, body_visible_text_len, html.len());
+    let dom_body_text = render_blocks(&blocks);
+    let low_signal = is_low_signal_extraction(&dom_body_text, body_visible_text_len, html.len());
+    let rescued_body = github
+        .as_ref()
+        .filter(|value| !value.body.is_empty())
+        .map(|value| normalize_schema_text(&value.body))
+        .or_else(|| {
+            select_schema_fallback(&dom_body_text, body_visible_text_len, low_signal, &schema)
+        });
+    let used_rescue = rescued_body.is_some();
+    let body_text = rescued_body.unwrap_or(dom_body_text);
+    let final_visible_text_len = body_text.chars().count();
+    let final_low_signal = !used_rescue && low_signal;
 
     let mut content = String::new();
     append_metadata_line(&mut content, "Title", displayed_title.as_deref());
     append_metadata_line(&mut content, "Description", metadata.description.as_deref());
+    append_metadata_line(&mut content, "Author", metadata.author.as_deref());
+    append_metadata_line(&mut content, "Published", metadata.published.as_deref());
     if !content.is_empty() && !body_text.is_empty() {
         content.push_str("\n\n");
     }
@@ -134,10 +187,10 @@ pub(super) fn extract_html(
         truncate_rendered_content(&content, super::MAX_CONTENT_CHARS);
 
     let mut warnings = Vec::new();
-    if body_visible_text_len < MIN_CONTENT_CHARS {
+    if final_visible_text_len < MIN_CONTENT_CHARS {
         push_warning(&mut warnings, Warning::LowContentYield);
     }
-    if low_signal {
+    if final_low_signal {
         push_warning(&mut warnings, Warning::LowSignalExtraction);
         if html_has_shell_markers(&html) {
             push_warning(&mut warnings, Warning::PossibleJsRenderedPage);
@@ -158,7 +211,13 @@ pub(super) fn extract_html(
     }
 }
 
-fn extract_metadata(document: &Html, selectors: &Selectors) -> HtmlMetadata {
+fn extract_metadata(
+    document: &Html,
+    selectors: &Selectors,
+    root: &RootSelection<'_>,
+    schema: &SchemaInfo,
+    github: Option<&GithubContent>,
+) -> HtmlMetadata {
     let h1 = document
         .select(&selectors.h1)
         .next()
@@ -170,15 +229,32 @@ fn extract_metadata(document: &Html, selectors: &Selectors) -> HtmlMetadata {
         .map(|value| normalize_inline(&value.text().collect::<String>()))
         .filter(|value| !value.is_empty())
         .or_else(|| meta_content(document, &selectors.meta_og_title))
-        .or_else(|| meta_content(document, &selectors.meta_twitter_title));
+        .or_else(|| meta_content(document, &selectors.meta_twitter_title))
+        .or_else(|| schema.title.clone());
     let description = meta_content(document, &selectors.meta_description)
         .or_else(|| meta_content(document, &selectors.meta_og_description))
-        .or_else(|| meta_content(document, &selectors.meta_twitter_description));
+        .or_else(|| meta_content(document, &selectors.meta_twitter_description))
+        .or_else(|| schema.description.clone());
+    let author = github
+        .and_then(|value| value.author.clone())
+        .or_else(|| schema.author.clone())
+        .or_else(|| meta_content(document, &selectors.meta_author_name))
+        .or_else(|| meta_content(document, &selectors.meta_author_property))
+        .or_else(|| meta_content(document, &selectors.meta_article_author))
+        .or_else(|| extract_nearby_author(root.element, selectors));
+    let published = github
+        .and_then(|value| value.published.clone())
+        .or_else(|| schema.published.clone())
+        .or_else(|| meta_content(document, &selectors.meta_published_property))
+        .or_else(|| meta_content(document, &selectors.meta_published_name))
+        .or_else(|| extract_nearby_published(root.element, selectors));
 
     HtmlMetadata {
         title,
         h1,
         description,
+        author,
+        published,
     }
 }
 
@@ -189,6 +265,397 @@ fn meta_content(document: &Html, selector: &Selector) -> Option<String> {
         .and_then(|value| value.value().attr("content"))
         .map(normalize_inline)
         .filter(|value| !value.is_empty())
+}
+
+fn extract_schema_info(document: &Html, selectors: &Selectors) -> SchemaInfo {
+    let mut info = SchemaInfo::default();
+    for script in document.select(&selectors.schema_json) {
+        let raw = script.text().collect::<String>();
+        if raw.trim().is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(&raw) else {
+            continue;
+        };
+        merge_schema_info(&mut info, &value, 0);
+    }
+    info
+}
+
+fn merge_schema_info(info: &mut SchemaInfo, value: &Value, depth: usize) {
+    if depth > 12 {
+        return;
+    }
+
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                merge_schema_info(info, item, depth + 1);
+            }
+        }
+        Value::Object(map) => {
+            if info.text.is_none() {
+                if let Some(text) = map
+                    .get("articleBody")
+                    .and_then(json_string)
+                    .or_else(|| map.get("text").and_then(json_string))
+                {
+                    let text = normalize_schema_text(&text);
+                    if is_useful_schema_text(&text) {
+                        info.text = Some(text);
+                    }
+                }
+            }
+            if info.title.is_none() {
+                info.title = map
+                    .get("headline")
+                    .and_then(json_string)
+                    .or_else(|| map.get("name").and_then(json_string))
+                    .map(|value| normalize_inline(&value))
+                    .filter(|value| !value.is_empty());
+            }
+            if info.description.is_none() {
+                info.description = map
+                    .get("description")
+                    .and_then(json_string)
+                    .map(|value| normalize_inline(&value))
+                    .filter(|value| !value.is_empty());
+            }
+            if info.author.is_none() {
+                info.author = map.get("author").and_then(extract_schema_author);
+            }
+            if info.published.is_none() {
+                info.published = map
+                    .get("datePublished")
+                    .and_then(json_string)
+                    .or_else(|| map.get("dateCreated").and_then(json_string))
+                    .or_else(|| map.get("uploadDate").and_then(json_string))
+                    .map(|value| normalize_inline(&value))
+                    .filter(|value| !value.is_empty());
+            }
+
+            for key in ["@graph", "mainEntity", "mainEntityOfPage", "itemListElement"] {
+                if let Some(child) = map.get(key) {
+                    merge_schema_info(info, child, depth + 1);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn extract_schema_author(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => extract_author_candidate(text),
+        Value::Object(map) => map
+            .get("name")
+            .and_then(json_string)
+            .and_then(|value| extract_author_candidate(&value)),
+        Value::Array(items) => {
+            let mut authors = Vec::new();
+            for item in items {
+                let Some(author) = extract_schema_author(item) else {
+                    continue;
+                };
+                if !authors.contains(&author) {
+                    authors.push(author);
+                }
+            }
+            (!authors.is_empty()).then_some(authors.join(", "))
+        }
+        _ => None,
+    }
+}
+
+fn json_string(value: &Value) -> Option<String> {
+    value.as_str().map(ToOwned::to_owned)
+}
+
+fn normalize_schema_text(input: &str) -> String {
+    let normalized = input.replace("\r\n", "\n").replace('\r', "\n");
+    strip_outer_blank_lines(&normalized)
+}
+
+fn is_useful_schema_text(text: &str) -> bool {
+    let chars = text.chars().count();
+    let words = text.split_whitespace().count();
+    chars >= 40 || words >= 8 || text.contains('\n')
+}
+
+fn select_schema_fallback(
+    body_text: &str,
+    visible_len: usize,
+    low_signal: bool,
+    schema: &SchemaInfo,
+) -> Option<String> {
+    let schema_text = schema.text.as_deref()?;
+    let body_len = body_text.trim().chars().count();
+    let schema_len = schema_text.chars().count();
+
+    if body_len == 0 {
+        return Some(schema_text.to_string());
+    }
+    if low_signal && schema_len >= body_len.max(40) {
+        return Some(schema_text.to_string());
+    }
+    if visible_len < (MIN_CONTENT_CHARS / 2)
+        && schema_len >= body_len.saturating_mul(2).max(80)
+        && schema_len >= body_len.saturating_add(80)
+    {
+        return Some(schema_text.to_string());
+    }
+    None
+}
+
+fn extract_nearby_author(root: ElementRef<'_>, selectors: &Selectors) -> Option<String> {
+    for selector in [
+        &selectors.rel_author,
+        &selectors.itemprop_author,
+        &selectors.class_byline,
+        &selectors.class_author,
+    ] {
+        for element in root.select(selector) {
+            let text = normalize_inline(&element.text().collect::<String>());
+            if let Some(author) = extract_author_candidate(&text) {
+                return Some(author);
+            }
+        }
+    }
+    None
+}
+
+fn extract_author_candidate(input: &str) -> Option<String> {
+    let normalized = normalize_inline(input);
+    if normalized.is_empty() {
+        return None;
+    }
+
+    let mut candidate = normalized
+        .strip_prefix("By ")
+        .or_else(|| normalized.strip_prefix("by "))
+        .unwrap_or(&normalized)
+        .trim();
+
+    for separator in ['·', '|', '—', '–'] {
+        candidate = candidate.split(separator).next().unwrap_or(candidate).trim();
+    }
+
+    if let Some(prefix) = candidate.strip_suffix(',') {
+        candidate = prefix.trim();
+    }
+
+    let words = candidate.split_whitespace().count();
+    let lower = candidate.to_ascii_lowercase();
+    let has_month = [
+        "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+    ]
+    .iter()
+    .any(|value| lower.contains(value));
+
+    if candidate.is_empty()
+        || candidate.len() > 80
+        || words == 0
+        || words > 8
+        || lower == "author"
+        || lower == "by"
+        || candidate.chars().any(|ch| ch.is_ascii_digit())
+        || has_month
+    {
+        return None;
+    }
+
+    Some(candidate.to_string())
+}
+
+fn extract_nearby_published(root: ElementRef<'_>, selectors: &Selectors) -> Option<String> {
+    root.select(&selectors.time_datetime)
+        .next()
+        .and_then(|value| value.value().attr("datetime"))
+        .map(normalize_inline)
+        .filter(|value| !value.is_empty())
+}
+
+fn extract_github_content(
+    source_url: Option<&str>,
+    document: &Html,
+    selectors: &Selectors,
+    schema: &SchemaInfo,
+) -> Option<GithubContent> {
+    let source_url = source_url?;
+    if !is_github_issue_or_pr_url(source_url) {
+        return None;
+    }
+
+    let embedded = extract_github_embedded_content(document, selectors);
+    let mut body = schema.text.clone().unwrap_or_default();
+    if body.is_empty() {
+        body = embedded.body.clone();
+    }
+    if body.is_empty() {
+        body = extract_github_visible_body(document, selectors);
+    }
+
+    let author = schema
+        .author
+        .clone()
+        .or(embedded.author)
+        .or_else(|| extract_github_visible_author(document, selectors));
+    let published = schema
+        .published
+        .clone()
+        .or(embedded.published)
+        .or_else(|| extract_github_visible_published(document, selectors));
+
+    if body.trim().is_empty() && author.is_none() && published.is_none() {
+        None
+    } else {
+        Some(GithubContent {
+            body,
+            author,
+            published,
+        })
+    }
+}
+
+fn is_github_issue_or_pr_url(url: &str) -> bool {
+    let Ok(parsed) = Url::parse(url) else {
+        return false;
+    };
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    if !matches!(host, "github.com" | "www.github.com") {
+        return false;
+    }
+
+    let segments = parsed.path_segments().map(|value| value.collect::<Vec<_>>());
+    let Some(segments) = segments else {
+        return false;
+    };
+    if segments.len() < 4 {
+        return false;
+    }
+    matches!(segments[2], "issues" | "pull") && segments[3].chars().all(|ch| ch.is_ascii_digit())
+}
+
+fn extract_github_embedded_content(document: &Html, selectors: &Selectors) -> GithubContent {
+    for script in document.select(&selectors.github_embedded_data) {
+        let raw = script.text().collect::<String>();
+        if raw.trim().is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(&raw) else {
+            continue;
+        };
+        if let Some(found) = find_github_discussion_record(&value, 0) {
+            return found;
+        }
+    }
+    GithubContent::default()
+}
+
+fn find_github_discussion_record(value: &Value, depth: usize) -> Option<GithubContent> {
+    if depth > 16 {
+        return None;
+    }
+
+    match value {
+        Value::Array(items) => items
+            .iter()
+            .find_map(|item| find_github_discussion_record(item, depth + 1)),
+        Value::Object(map) => {
+            let typename = map.get("__typename").and_then(Value::as_str);
+            if matches!(typename, Some("Issue" | "PullRequest")) {
+                let body = map
+                    .get("body")
+                    .and_then(json_string)
+                    .map(|value| normalize_schema_text(&value))
+                    .unwrap_or_default();
+                if !body.is_empty() {
+                    return Some(GithubContent {
+                        body,
+                        author: map.get("author").and_then(extract_github_author),
+                        published: map
+                            .get("createdAt")
+                            .and_then(json_string)
+                            .map(|value| normalize_inline(&value)),
+                    });
+                }
+            }
+
+            map.values()
+                .find_map(|child| find_github_discussion_record(child, depth + 1))
+        }
+        _ => None,
+    }
+}
+
+fn extract_github_author(value: &Value) -> Option<String> {
+    match value {
+        Value::Object(map) => map
+            .get("login")
+            .and_then(json_string)
+            .or_else(|| map.get("name").and_then(json_string))
+            .map(|value| normalize_inline(&value))
+            .filter(|value| !value.is_empty()),
+        Value::String(text) => {
+            let text = normalize_inline(text);
+            (!text.is_empty()).then_some(text)
+        }
+        _ => None,
+    }
+}
+
+fn extract_github_visible_body(document: &Html, selectors: &Selectors) -> String {
+    if let Some(body) = document.select(&selectors.github_issue_body).next() {
+        return render_element_blocks(body);
+    }
+    if let Some(body) = document.select(&selectors.github_pr_body).next() {
+        return render_element_blocks(body);
+    }
+    String::new()
+}
+
+fn extract_github_visible_author(document: &Html, selectors: &Selectors) -> Option<String> {
+    if let Some(container) = document.select(&selectors.github_issue_container).next() {
+        if let Some(author) = container.select(&selectors.github_issue_author).next() {
+            let value = normalize_inline(&author.text().collect::<String>());
+            if !value.is_empty() {
+                return Some(value);
+            }
+        }
+    }
+
+    document
+        .select(&selectors.github_pr_author)
+        .next()
+        .map(|value| normalize_inline(&value.text().collect::<String>()))
+        .filter(|value| !value.is_empty())
+}
+
+fn extract_github_visible_published(document: &Html, selectors: &Selectors) -> Option<String> {
+    if let Some(container) = document.select(&selectors.github_issue_container).next() {
+        if let Some(time) = container.select(&selectors.github_relative_time).next() {
+            if let Some(value) = time.value().attr("datetime") {
+                let value = normalize_inline(value);
+                if !value.is_empty() {
+                    return Some(value);
+                }
+            }
+        }
+    }
+
+    document
+        .select(&selectors.github_relative_time)
+        .next()
+        .and_then(|value| value.value().attr("datetime"))
+        .map(normalize_inline)
+        .filter(|value| !value.is_empty())
+}
+
+fn render_element_blocks(element: ElementRef<'_>) -> String {
+    let blocks = prune_noise_blocks(collect_blocks_from_children(element));
+    render_blocks(&blocks)
 }
 
 fn collect_blocks_from_children(container: ElementRef<'_>) -> Vec<HtmlBlock> {
@@ -320,7 +787,7 @@ fn is_ui_crumb(text: &str) -> bool {
     let normalized = normalize_inline(text).to_ascii_lowercase();
     matches!(
         normalized.as_str(),
-        "[edit]" | "toggle" | "expand description"
+        "[edit]" | "toggle" | "expand description" | "source"
     )
 }
 
@@ -1059,6 +1526,28 @@ fn build_selectors() -> Result<Selectors, String> {
         meta_twitter_description: parse_selector("meta[name='twitter:description']")?,
         meta_og_title: parse_selector("meta[property='og:title']")?,
         meta_twitter_title: parse_selector("meta[name='twitter:title']")?,
+        meta_author_name: parse_selector("meta[name='author']")?,
+        meta_author_property: parse_selector("meta[property='author']")?,
+        meta_article_author: parse_selector(
+            "meta[property='article:author'], meta[name='article:author']",
+        )?,
+        meta_published_name: parse_selector(
+            "meta[name='article:published_time'], meta[name='pubdate']",
+        )?,
+        meta_published_property: parse_selector("meta[property='article:published_time']")?,
+        schema_json: parse_selector("script[type='application/ld+json']")?,
+        time_datetime: parse_selector("time[datetime]")?,
+        rel_author: parse_selector("[rel='author']")?,
+        itemprop_author: parse_selector("[itemprop='author']")?,
+        class_author: parse_selector(".author")?,
+        class_byline: parse_selector(".byline")?,
+        github_embedded_data: parse_selector("script[data-target='react-app.embeddedData']")?,
+        github_issue_container: parse_selector("[data-testid='issue-viewer-issue-container']")?,
+        github_issue_body: parse_selector("[data-testid='issue-body-viewer'] .markdown-body")?,
+        github_issue_author: parse_selector("a[data-testid='issue-body-header-author']")?,
+        github_pr_body: parse_selector(".comment-body.markdown-body")?,
+        github_pr_author: parse_selector(".gh-header-meta .author, .timeline-comment .author")?,
+        github_relative_time: parse_selector("relative-time")?,
         main: parse_selector("main")?,
         article: parse_selector("article")?,
         role_main: parse_selector("[role='main']")?,
@@ -1112,9 +1601,16 @@ fn is_noisy_element(element: &ElementRef<'_>) -> bool {
 
     if let Some(value) = element.value().attr("style") {
         let value = value.to_ascii_lowercase();
-        if value.contains("display:none") || value.contains("visibility:hidden") {
+        if value.contains("display:none")
+            || value.contains("visibility:hidden")
+            || value.contains("opacity:0")
+        {
             return true;
         }
+    }
+
+    if has_hidden_utility_class(element) {
+        return true;
     }
 
     for attr in ["class", "id"] {
@@ -1130,6 +1626,21 @@ fn is_noisy_element(element: &ElementRef<'_>) -> bool {
     }
 
     false
+}
+
+fn has_hidden_utility_class(element: &ElementRef<'_>) -> bool {
+    element
+        .value()
+        .attr("class")
+        .map(|value| {
+            value.split_whitespace().any(|token| {
+                token.eq_ignore_ascii_case("hidden")
+                    || token.eq_ignore_ascii_case("invisible")
+                    || token.to_ascii_lowercase().ends_with(":hidden")
+                    || token.to_ascii_lowercase().ends_with(":invisible")
+            })
+        })
+        .unwrap_or(false)
 }
 
 fn is_low_signal_extraction(body_text: &str, visible_len: usize, raw_html_len: usize) -> bool {

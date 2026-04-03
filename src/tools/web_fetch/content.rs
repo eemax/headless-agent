@@ -1,3 +1,4 @@
+use encoding_rs::{Encoding, UTF_8, WINDOWS_1252};
 use serde_json::Value;
 
 use super::{ExtractionKind, MAX_CONTENT_CHARS, Warning, html::extract_html};
@@ -21,6 +22,7 @@ enum SniffedKind {
 }
 
 pub(super) fn extract_content(
+    source_url: Option<&str>,
     content_type_header: Option<&str>,
     body: &[u8],
     content_length: Option<u64>,
@@ -29,8 +31,14 @@ pub(super) fn extract_content(
     let kind = sniff_content_kind(content_type_header, body);
     match kind {
         SniffedKind::Json => extract_json(body, body_truncated),
-        SniffedKind::Html => extract_html(content_type_header, body, body_truncated),
-        SniffedKind::Text => extract_text(content_type_header, body, body_truncated),
+        SniffedKind::Html => {
+            let rendered = decode_text_body(content_type_header, body, true);
+            extract_html(source_url, content_type_header, &rendered, body_truncated)
+        }
+        SniffedKind::Text => {
+            let rendered = decode_text_body(content_type_header, body, false);
+            extract_text(content_type_header, &rendered, body_truncated)
+        }
         SniffedKind::Binary => {
             extract_binary(content_type_header, content_length, body, body_truncated)
         }
@@ -73,10 +81,10 @@ fn extract_json(body: &[u8], body_truncated: bool) -> ExtractedContent {
 
 fn extract_text(
     content_type_header: Option<&str>,
-    body: &[u8],
+    rendered: &str,
     body_truncated: bool,
 ) -> ExtractedContent {
-    let rendered = normalize_text_body(&String::from_utf8_lossy(body));
+    let rendered = normalize_text_body(rendered);
     let (content, content_truncated) = truncate_chars(&rendered, MAX_CONTENT_CHARS);
     let mut warnings = Vec::new();
     if body_truncated || content_truncated {
@@ -170,6 +178,89 @@ pub(super) fn normalize_content_type(header: Option<&str>) -> Option<String> {
             .trim()
             .to_ascii_lowercase()
     })
+}
+
+fn decode_text_body(
+    content_type_header: Option<&str>,
+    body: &[u8],
+    sniff_html_meta: bool,
+) -> String {
+    let encoding = detect_encoding(content_type_header, body, sniff_html_meta);
+    if encoding == UTF_8 && std::str::from_utf8(body).is_ok() {
+        return String::from_utf8_lossy(body).into_owned();
+    }
+    let (decoded, _, _) = encoding.decode(body);
+    decoded.into_owned()
+}
+
+fn detect_encoding(
+    content_type_header: Option<&str>,
+    body: &[u8],
+    sniff_html_meta: bool,
+) -> &'static Encoding {
+    if let Some(label) = charset_from_content_type(content_type_header)
+        .or_else(|| sniff_html_meta.then(|| charset_from_html_meta(body)).flatten())
+    {
+        if let Some(encoding) = Encoding::for_label(label.as_bytes()) {
+            return encoding;
+        }
+    }
+
+    if std::str::from_utf8(body).is_ok() {
+        UTF_8
+    } else {
+        WINDOWS_1252
+    }
+}
+
+fn charset_from_content_type(header: Option<&str>) -> Option<String> {
+    let header = header?;
+    let charset = header
+        .split(';')
+        .skip(1)
+        .find_map(|part| {
+            let mut pieces = part.trim().splitn(2, '=');
+            let key = pieces.next()?.trim();
+            let value = pieces.next()?.trim();
+            key.eq_ignore_ascii_case("charset")
+                .then_some(value.trim_matches(|ch| matches!(ch, '"' | '\'')))
+        })?;
+    (!charset.is_empty()).then_some(charset.to_ascii_lowercase())
+}
+
+fn charset_from_html_meta(body: &[u8]) -> Option<String> {
+    let sample = String::from_utf8_lossy(&body[..body.len().min(4096)]).to_ascii_lowercase();
+    let bytes = sample.as_bytes();
+    let mut search_from = 0usize;
+    while let Some(start) = sample[search_from..].find("<meta") {
+        let start = search_from + start;
+        let end = sample[start..]
+            .find('>')
+            .map(|value| start + value)
+            .unwrap_or(sample.len());
+        let tag = &sample[start..end];
+        if let Some(charset) = extract_charset_assignment(tag) {
+            return Some(charset);
+        }
+        search_from = end.min(bytes.len());
+    }
+    None
+}
+
+fn extract_charset_assignment(tag: &str) -> Option<String> {
+    if let Some(index) = tag.find("charset=") {
+        let value = &tag[(index + "charset=".len())..];
+        let charset = value
+            .trim_start()
+            .trim_matches(|ch: char| matches!(ch, '"' | '\'' | ' ' | '\t'))
+            .split(|ch: char| matches!(ch, '"' | '\'' | ';' | ' ' | '\t' | '>'))
+            .next()
+            .unwrap_or("");
+        if !charset.is_empty() {
+            return Some(charset.to_ascii_lowercase());
+        }
+    }
+    None
 }
 
 fn is_generic_content_type(content_type: &str) -> bool {

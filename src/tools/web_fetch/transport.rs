@@ -319,6 +319,7 @@ fn candidate_addresses(addresses: &[SocketAddr]) -> Vec<SocketAddr> {
 
 fn build_fetch_result(requested_url: &str, response: TransportResponse) -> FetchResult {
     let extraction = extract_content(
+        Some(response.url.as_str()),
         response.content_type.as_deref(),
         &response.body,
         response.content_length,
