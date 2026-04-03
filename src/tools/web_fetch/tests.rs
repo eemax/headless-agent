@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
-    io,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    io::{self, Read, Write},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener},
     sync::{
         Arc, Condvar, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -13,14 +13,14 @@ use std::{
 use url::Url;
 
 use super::{
-    FetchResult, REQUEST_TIMEOUT, Warning,
+    FailureContext, FetchResult, REQUEST_TIMEOUT, Warning,
     content::ExtractedContent,
     fetch_url_with_timeout,
     html::extract_html,
     render_cli_output,
     transport::{
         DnsResolver, HttpTransport, ResolveBackend, ResolverPool, TransportFailure,
-        TransportFailureKind, TransportResponse, fetch_with_clients,
+        TransportFailureKind, TransportResponse, UreqTransport, fetch_with_clients,
     },
 };
 
@@ -143,11 +143,17 @@ impl HttpTransport for FakeTransport {
             Some(Ok(response)) => Ok(response.clone()),
             Some(Err(kind)) => Err(TransportFailure {
                 kind: *kind,
-                url: Some(url.clone()),
+                context: FailureContext {
+                    final_url: Some(url.to_string()),
+                    ..FailureContext::default()
+                },
             }),
             None => Err(TransportFailure {
                 kind: TransportFailureKind::Connect,
-                url: Some(url.clone()),
+                context: FailureContext {
+                    final_url: Some(url.to_string()),
+                    ..FailureContext::default()
+                },
             }),
         }
     }
@@ -192,6 +198,26 @@ fn response(url: &str, status: u16, content_type: Option<&str>, body: &[u8]) -> 
         bytes_read: body.len() as u64,
         body_truncated: false,
     }
+}
+
+fn spawn_http_test_server(
+    response: String,
+) -> (SocketAddr, Arc<Mutex<String>>, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind test listener");
+    let address = listener.local_addr().expect("listener addr");
+    let request = Arc::new(Mutex::new(String::new()));
+    let captured_request = Arc::clone(&request);
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept request");
+        let mut buffer = [0u8; 8192];
+        let bytes_read = stream.read(&mut buffer).expect("read request");
+        *captured_request.lock().expect("capture request") =
+            String::from_utf8_lossy(&buffer[..bytes_read]).into_owned();
+        stream
+            .write_all(response.as_bytes())
+            .expect("write response");
+    });
+    (address, request, handle)
 }
 
 fn html_output(body: &str) -> ExtractedContent {
@@ -973,6 +999,63 @@ fn truncation_closes_the_exact_open_code_fence() {
 }
 
 #[test]
+fn http_links_render_as_markdown_and_non_http_links_stay_plain_text() {
+    let result = html_output_at_url(
+        "https://example.test/articles/start",
+        r##"
+        <html>
+          <body>
+            <main>
+              <p>
+                Read the <a href="/docs">docs</a>,
+                browse the <a href="https://api.example.test/v1">API</a>,
+                jump to <a href="#footnotes">footnotes</a>,
+                and ignore <a href="javascript:alert('x')">this</a>.
+              </p>
+            </main>
+          </body>
+        </html>
+        "##,
+    );
+
+    assert!(result.content.contains("[docs](<https://example.test/docs>)"));
+    assert!(result.content.contains("[API](<https://api.example.test/v1>)"));
+    assert!(result.content.contains("footnotes"));
+    assert!(!result.content.contains("#footnotes"));
+    assert!(result.content.contains("this"));
+    assert!(!result.content.contains("javascript:alert"));
+}
+
+#[test]
+fn candidate_root_scoring_skips_shell_main_for_real_article_content() {
+    let result = html_output_at_url(
+        "https://example.test/blog/post",
+        r#"
+        <html>
+          <body>
+            <main class="nav-shell">
+              <p><a href="/docs">Docs</a> <a href="/pricing">Pricing</a> <a href="/blog">Blog</a></p>
+            </main>
+            <article>
+              <h1>Launch notes</h1>
+              <p>This release explains how the worker pool is initialized, how retries behave, and how operators should verify rollout health.</p>
+              <p>It also covers failure handling, metrics, and the migration path for existing deployments that use older fetch settings.</p>
+            </article>
+          </body>
+        </html>
+        "#,
+    );
+
+    assert!(result.content.contains("This release explains how the worker pool is initialized"));
+    assert!(
+        !result
+            .content
+            .contains("[Docs](<https://example.test/docs>) [Pricing](<https://example.test/pricing>)")
+    );
+    assert!(!result.warnings.contains(&Warning::LowSignalExtraction));
+}
+
+#[test]
 fn github_issue_embedded_data_extracts_body_author_and_published() {
     let result = html_output_at_url(
         "https://github.com/example/repo/issues/42",
@@ -1050,6 +1133,110 @@ fn github_pr_visible_body_fallback_extracts_body_author_and_published() {
     assert!(result.content.contains("```rust\nassert!(done);\n```"));
     assert!(result.content.contains("Author: octocat"));
     assert!(result.content.contains("Published: 2026-03-04T05:06:07Z"));
+}
+
+#[test]
+fn github_issue_embedded_discussion_appends_issue_comments() {
+    let result = html_output_at_url(
+        "https://github.com/example/repo/issues/42",
+        r#"
+        <html>
+          <body>
+            <script type="application/json" data-target="react-app.embeddedData">
+              {
+                "payload": {
+                  "preloadedQueries": [
+                    {
+                      "result": {
+                        "data": {
+                          "repository": {
+                            "issue": {
+                              "number": 42,
+                              "__typename": "Issue",
+                              "bodyHTML": "<p>Main issue body.</p>",
+                              "createdAt": "2026-02-03T04:05:06Z",
+                              "author": { "login": "octocat" },
+                              "frontTimelineItems": {
+                                "edges": [
+                                  {
+                                    "node": {
+                                      "__typename": "IssueComment",
+                                      "bodyHTML": "<p>First follow-up from the thread.</p>",
+                                      "createdAt": "2026-02-04T01:02:03Z",
+                                      "author": { "login": "reviewer1" }
+                                    }
+                                  },
+                                  {
+                                    "node": {
+                                      "__typename": "CrossReferencedEvent",
+                                      "createdAt": "2026-02-05T01:02:03Z"
+                                    }
+                                  }
+                                ]
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            </script>
+          </body>
+        </html>
+        "#,
+    );
+
+    assert!(result.content.contains("Main issue body."));
+    assert!(result.content.contains("## Discussion"));
+    assert!(result.content.contains("### reviewer1"));
+    assert!(result.content.contains("First follow-up from the thread."));
+}
+
+#[test]
+fn github_pr_visible_discussion_includes_review_comments_without_duplicating_main_body() {
+    let result = html_output_at_url(
+        "https://github.com/example/repo/pull/7",
+        r#"
+        <html>
+          <body>
+            <div class="gh-header-meta">
+              <a class="author" href="/octocat">octocat</a>
+            </div>
+            <relative-time datetime="2026-03-04T05:06:07Z"></relative-time>
+            <div class="timeline-comment">
+              <a class="author" href="/octocat">octocat</a>
+              <relative-time datetime="2026-03-04T05:06:07Z"></relative-time>
+              <div class="comment-body markdown-body">
+                <p>Main PR body.</p>
+              </div>
+            </div>
+            <div class="timeline-comment">
+              <a class="author" href="/reviewer1">reviewer1</a>
+              <relative-time datetime="2026-03-05T01:02:03Z"></relative-time>
+              <div class="comment-body markdown-body">
+                <p>Looks good overall.</p>
+              </div>
+            </div>
+            <div class="review-comment">
+              <a class="author" href="/reviewer2">reviewer2</a>
+              <relative-time datetime="2026-03-05T12:00:00Z"></relative-time>
+              <div class="comment-body markdown-body">
+                <p>Please add a regression test.</p>
+                <pre><code class="language-rust">assert!(stable);</code></pre>
+              </div>
+            </div>
+          </body>
+        </html>
+        "#,
+    );
+
+    assert_eq!(result.content.matches("Main PR body.").count(), 1);
+    assert!(result.content.contains("## Discussion"));
+    assert!(result.content.contains("Looks good overall."));
+    assert!(result.content.contains("Please add a regression test."));
+    assert!(result.content.contains("```rust\nassert!(stable);\n```"));
 }
 
 #[test]
@@ -1618,6 +1805,40 @@ fn binary_summary_uses_content_length_when_present() {
 }
 
 #[test]
+fn declared_oversized_response_returns_content_too_large_and_uses_browser_headers() {
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        super::MAX_DOWNLOAD_BYTES + 1
+    );
+    let (address, request, handle) = spawn_http_test_server(response);
+    let transport = UreqTransport;
+    let failure = transport
+        .get(
+            &Url::parse("http://example.test/large").expect("url"),
+            address,
+            Duration::from_secs(5),
+        )
+        .expect_err("oversized response should fail");
+    handle.join().expect("server thread");
+
+    assert_eq!(failure.kind, TransportFailureKind::TooLarge);
+    assert_eq!(failure.context.status, Some(200));
+    assert_eq!(
+        failure.context.content_type.as_deref(),
+        Some("text/html")
+    );
+    assert_eq!(
+        failure.context.final_url.as_deref(),
+        Some("http://example.test/large")
+    );
+
+    let request = request.lock().expect("captured request");
+    assert!(request.contains("User-Agent: Mozilla/5.0"));
+    assert!(request.contains("Chrome/135.0.0.0"));
+    assert!(request.contains("Accept-Language: en-US,en;q=0.9"));
+}
+
+#[test]
 fn low_yield_shell_pages_are_flagged() {
     let resolver = FakeResolver::default().with_mapping("example.test", 80, vec![socket(80)]);
     let body =
@@ -1819,10 +2040,11 @@ fn github_repo_fixture_extracts_real_page_overview() {
 
     assert!(result.content.contains("## Top-level entries"));
     assert!(result.content.contains("- compiler/"));
+    assert!(result.content.contains("This is the main source code repository for"));
     assert!(
         result
             .content
-            .contains("This is the main source code repository for Rust.")
+            .contains("[Rust](<https://www.rust-lang.org/>)")
     );
 }
 
@@ -1845,10 +2067,11 @@ fn github_blob_fixture_extracts_real_blob_markdown() {
         GITHUB_BLOB_FIXTURE,
     );
 
+    assert!(result.content.contains("This is the main source code repository for"));
     assert!(
         result
             .content
-            .contains("This is the main source code repository for Rust.")
+            .contains("[Rust](<https://www.rust-lang.org/>)")
     );
     assert!(result.content.contains("## Why Rust?"));
 }

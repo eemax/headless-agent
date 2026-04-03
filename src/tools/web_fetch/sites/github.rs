@@ -21,8 +21,12 @@ struct Selectors {
     issue_container: Selector,
     issue_body: Selector,
     issue_author: Selector,
+    issue_comment_container: Selector,
     pr_body: Selector,
     pr_author: Selector,
+    pr_discussion_container: Selector,
+    visible_discussion_body: Selector,
+    visible_discussion_author: Selector,
     relative_time: Selector,
     release_section: Selector,
     release_title: Selector,
@@ -48,29 +52,46 @@ struct DiscussionContent {
     body: String,
     author: Option<String>,
     published: Option<String>,
+    comments: Vec<DiscussionEntry>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct DiscussionEntry {
+    author: Option<String>,
+    published: Option<String>,
+    body: String,
 }
 
 pub(super) fn extract(source_url: Option<&str>, document: &Html) -> Option<SiteExtraction> {
     let source_url = source_url?;
+    let parsed_url = Url::parse(source_url).ok()?;
     let route = classify_route(source_url)?;
     let selectors = selectors().ok()?;
 
     match route {
-        GithubRoute::RepoOverview => extract_repo_overview(document, selectors),
-        GithubRoute::Tree => extract_tree(document, selectors),
-        GithubRoute::Blob => extract_blob(document, selectors),
-        GithubRoute::Issue { number } => extract_issue_or_pull(document, selectors, number, true),
-        GithubRoute::Pull { number } => extract_issue_or_pull(document, selectors, number, false),
+        GithubRoute::RepoOverview => extract_repo_overview(document, selectors, &parsed_url),
+        GithubRoute::Tree => extract_tree(document, selectors, &parsed_url),
+        GithubRoute::Blob => extract_blob(document, selectors, &parsed_url),
+        GithubRoute::Issue { number } => {
+            extract_issue_or_pull(document, selectors, &parsed_url, number, true)
+        }
+        GithubRoute::Pull { number } => {
+            extract_issue_or_pull(document, selectors, &parsed_url, number, false)
+        }
         GithubRoute::Releases | GithubRoute::ReleaseLatest => {
-            extract_release(document, selectors, ReleaseScope::FirstSection)
+            extract_release(document, selectors, &parsed_url, ReleaseScope::FirstSection)
         }
         GithubRoute::ReleaseTag => {
-            extract_release(document, selectors, ReleaseScope::WholeDocument)
+            extract_release(document, selectors, &parsed_url, ReleaseScope::WholeDocument)
         }
     }
 }
 
-fn extract_repo_overview(document: &Html, selectors: &Selectors) -> Option<SiteExtraction> {
+fn extract_repo_overview(
+    document: &Html,
+    selectors: &Selectors,
+    source_url: &Url,
+) -> Option<SiteExtraction> {
     let payload = embedded_payload(document, selectors)?;
     let items = get_path(&payload, &["payload", "codeViewRepoRoute", "tree", "items"])
         .and_then(Value::as_array);
@@ -83,7 +104,7 @@ fn extract_repo_overview(document: &Html, selectors: &Selectors) -> Option<SiteE
     .and_then(Value::as_array)
     .and_then(|files| select_primary_overview_file(files))
     .and_then(extract_rich_text_field)
-    .map(|html| render_html_fragment(&html))
+    .map(|html| render_html_fragment(&html, Some(source_url)))
     .filter(|text| !text.trim().is_empty());
 
     let body = join_sections([entries, readme]);
@@ -93,7 +114,7 @@ fn extract_repo_overview(document: &Html, selectors: &Selectors) -> Option<SiteE
     })
 }
 
-fn extract_tree(document: &Html, selectors: &Selectors) -> Option<SiteExtraction> {
+fn extract_tree(document: &Html, selectors: &Selectors, source_url: &Url) -> Option<SiteExtraction> {
     let payload = embedded_payload(document, selectors)?;
     let items = get_path(&payload, &["payload", "codeViewTreeRoute", "tree", "items"])
         .and_then(Value::as_array);
@@ -102,7 +123,7 @@ fn extract_tree(document: &Html, selectors: &Selectors) -> Option<SiteExtraction
         &payload,
         &["payload", "codeViewTreeRoute", "tree", "readme"],
     )
-    .and_then(extract_rich_text_value)
+    .and_then(|value| extract_rich_text_value(value, Some(source_url)))
     .filter(|text| !text.trim().is_empty());
 
     let body = join_sections([entries, readme]);
@@ -112,11 +133,11 @@ fn extract_tree(document: &Html, selectors: &Selectors) -> Option<SiteExtraction
     })
 }
 
-fn extract_blob(document: &Html, selectors: &Selectors) -> Option<SiteExtraction> {
+fn extract_blob(document: &Html, selectors: &Selectors, source_url: &Url) -> Option<SiteExtraction> {
     let payload = embedded_payload(document, selectors)?;
     let rendered = get_path(&payload, &["payload", "codeViewBlobRoute", "richText"])
         .and_then(Value::as_str)
-        .map(render_html_fragment)
+        .map(|html| render_html_fragment(html, Some(source_url)))
         .filter(|text| !text.trim().is_empty());
 
     if let Some(body) = rendered {
@@ -157,17 +178,29 @@ fn extract_blob(document: &Html, selectors: &Selectors) -> Option<SiteExtraction
 fn extract_issue_or_pull(
     document: &Html,
     selectors: &Selectors,
+    source_url: &Url,
     route_number: u64,
     is_issue: bool,
 ) -> Option<SiteExtraction> {
-    let embedded = extract_embedded_discussion(document, selectors, route_number);
-    let body = if !embedded.body.is_empty() {
+    let embedded = extract_embedded_discussion(document, selectors, source_url, route_number);
+    let primary_body = if !embedded.body.is_empty() {
         embedded.body.clone()
     } else if is_issue {
-        extract_issue_visible_body(document, selectors)
+        extract_issue_visible_body(document, selectors, source_url)
     } else {
-        extract_pr_visible_body(document, selectors)
+        extract_pr_visible_body(document, selectors, source_url)
     };
+    let discussion = if !embedded.comments.is_empty() {
+        embedded.comments.clone()
+    } else if is_issue {
+        extract_issue_visible_discussion(document, selectors, source_url)
+    } else {
+        extract_pr_visible_discussion(document, selectors, source_url)
+    };
+    let body = join_sections([
+        (!primary_body.trim().is_empty()).then_some(primary_body),
+        (!discussion.is_empty()).then_some(render_discussion_section(&discussion)),
+    ]);
     let author = embedded.author.or_else(|| {
         if is_issue {
             extract_issue_visible_author(document, selectors)
@@ -200,6 +233,7 @@ enum ReleaseScope {
 fn extract_release(
     document: &Html,
     selectors: &Selectors,
+    source_url: &Url,
     scope: ReleaseScope,
 ) -> Option<SiteExtraction> {
     let section = match scope {
@@ -211,7 +245,7 @@ fn extract_release(
     let author = select_text(section, document, &selectors.release_author);
     let published = select_datetime(section, document, &selectors.relative_time);
     let body = select_element(section, document, &selectors.release_body)
-        .map(render_element_blocks)
+        .map(|element| render_element_blocks(element, Some(source_url)))
         .filter(|text| !text.trim().is_empty());
     let assets = collect_release_assets(section, document, selectors);
 
@@ -345,14 +379,14 @@ fn select_primary_overview_file(files: &[Value]) -> Option<&Value> {
         })
 }
 
-fn extract_rich_text_value(value: &Value) -> Option<String> {
+fn extract_rich_text_value(value: &Value, base_url: Option<&Url>) -> Option<String> {
     if let Some(html) = value.as_str() {
-        let rendered = render_html_fragment(html);
+        let rendered = render_html_fragment(html, base_url);
         return (!rendered.trim().is_empty()).then_some(rendered);
     }
 
     extract_rich_text_field(value)
-        .map(|html| render_html_fragment(&html))
+        .map(|html| render_html_fragment(&html, base_url))
         .filter(|text| !text.trim().is_empty())
 }
 
@@ -371,24 +405,30 @@ fn extract_rich_text_field(value: &Value) -> Option<String> {
 fn extract_embedded_discussion(
     document: &Html,
     selectors: &Selectors,
+    source_url: &Url,
     route_number: u64,
 ) -> DiscussionContent {
     let Some(payload) = embedded_payload(document, selectors) else {
         return DiscussionContent::default();
     };
-    find_discussion_record(&payload, route_number).unwrap_or_default()
+    find_discussion_record(&payload, source_url, route_number).unwrap_or_default()
 }
 
-fn find_discussion_record(payload: &Value, route_number: u64) -> Option<DiscussionContent> {
+fn find_discussion_record(
+    payload: &Value,
+    source_url: &Url,
+    route_number: u64,
+) -> Option<DiscussionContent> {
     let queries = get_path(payload, &["payload", "preloadedQueries"])?.as_array()?;
     queries.iter().find_map(|query| {
         let issue = get_path(query, &["result", "data", "repository", "issue"])?;
-        extract_repository_issue_discussion(issue, route_number)
+        extract_repository_issue_discussion(issue, source_url, route_number)
     })
 }
 
 fn extract_repository_issue_discussion(
     issue: &Value,
+    source_url: &Url,
     route_number: u64,
 ) -> Option<DiscussionContent> {
     let map = issue.as_object()?;
@@ -396,12 +436,9 @@ fn extract_repository_issue_discussion(
         return None;
     }
 
-    let body = map
-        .get("body")
-        .and_then(Value::as_str)
-        .map(normalize_multiline)
-        .unwrap_or_default();
-    if body.is_empty() {
+    let body = extract_discussion_body(issue, source_url).unwrap_or_default();
+    let comments = extract_timeline_discussion_entries(issue, source_url);
+    if body.is_empty() && comments.is_empty() {
         return None;
     }
 
@@ -413,6 +450,7 @@ fn extract_repository_issue_discussion(
             .and_then(Value::as_str)
             .map(normalize_inline)
             .filter(|value| !value.is_empty()),
+        comments,
     })
 }
 
@@ -432,20 +470,205 @@ fn extract_discussion_author(value: &Value) -> Option<String> {
     }
 }
 
-fn extract_issue_visible_body(document: &Html, selectors: &Selectors) -> String {
+fn extract_discussion_body(value: &Value, source_url: &Url) -> Option<String> {
+    for key in ["bodyHTML", "bodyHtml", "html", "markup"] {
+        if let Some(html) = value.get(key).and_then(Value::as_str) {
+            let rendered = render_html_fragment(html, Some(source_url));
+            if !rendered.trim().is_empty() {
+                return Some(rendered);
+            }
+        }
+    }
+    for key in ["bodyText", "body"] {
+        if let Some(text) = value.get(key).and_then(Value::as_str) {
+            let normalized = normalize_multiline(text);
+            if !normalized.is_empty() {
+                return Some(normalized);
+            }
+        }
+    }
+    None
+}
+
+fn extract_timeline_discussion_entries(issue: &Value, source_url: &Url) -> Vec<DiscussionEntry> {
+    let mut entries = Vec::new();
+    for key in ["frontTimelineItems", "backTimelineItems"] {
+        let Some(connection) = issue.get(key) else {
+            continue;
+        };
+        for node in connection_nodes(connection) {
+            collect_timeline_entries(node, source_url, 0, &mut entries);
+        }
+    }
+
+    entries.sort_by(|left, right| {
+        left.published
+            .cmp(&right.published)
+            .then_with(|| left.author.cmp(&right.author))
+            .then_with(|| left.body.cmp(&right.body))
+    });
+    entries.dedup_by(|left, right| {
+        left.author == right.author && left.published == right.published && left.body == right.body
+    });
+    entries
+}
+
+fn collect_timeline_entries(
+    node: &Value,
+    source_url: &Url,
+    depth: usize,
+    entries: &mut Vec<DiscussionEntry>,
+) {
+    if depth > 4 {
+        return;
+    }
+
+    if let Some(entry) = extract_timeline_entry(node, source_url) {
+        entries.push(entry);
+    }
+    for key in ["comments", "reviewComments", "reviewThreads", "threads"] {
+        let Some(children) = node.get(key) else {
+            continue;
+        };
+        for child in connection_nodes(children) {
+            collect_timeline_entries(child, source_url, depth + 1, entries);
+        }
+    }
+}
+
+fn extract_timeline_entry(node: &Value, source_url: &Url) -> Option<DiscussionEntry> {
+    let typename = node.get("__typename").and_then(Value::as_str)?;
+    if !matches!(
+        typename,
+        "IssueComment" | "PullRequestReview" | "PullRequestReviewComment"
+    ) {
+        return None;
+    }
+    if node
+        .get("isHidden")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || node.get("minimizedReason").is_some_and(|value| !value.is_null())
+    {
+        return None;
+    }
+
+    let body = extract_discussion_body(node, source_url)?;
+    let body = normalize_multiline(&body);
+    if body.is_empty() {
+        return None;
+    }
+
+    Some(DiscussionEntry {
+        author: node.get("author").and_then(extract_discussion_author),
+        published: node
+            .get("createdAt")
+            .and_then(Value::as_str)
+            .map(normalize_inline)
+            .filter(|value| !value.is_empty()),
+        body,
+    })
+}
+
+fn connection_nodes<'a>(value: &'a Value) -> Vec<&'a Value> {
+    if let Some(nodes) = value.get("nodes").and_then(Value::as_array) {
+        return nodes.iter().collect();
+    }
+    if let Some(edges) = value.get("edges").and_then(Value::as_array) {
+        return edges.iter().filter_map(|edge| edge.get("node")).collect();
+    }
+    Vec::new()
+}
+
+fn render_discussion_section(entries: &[DiscussionEntry]) -> String {
+    let mut body = String::from("## Discussion");
+    for entry in entries {
+        body.push_str("\n\n### ");
+        body.push_str(entry.author.as_deref().unwrap_or("Unknown"));
+        if let Some(published) = entry.published.as_deref() {
+            body.push_str("\nPublished: ");
+            body.push_str(published);
+        }
+        body.push_str("\n\n");
+        body.push_str(entry.body.trim());
+    }
+    strip_outer_blank_lines(&body)
+}
+
+fn extract_issue_visible_body(document: &Html, selectors: &Selectors, source_url: &Url) -> String {
     document
         .select(&selectors.issue_body)
         .next()
-        .map(render_element_blocks)
+        .map(|element| render_element_blocks(element, Some(source_url)))
         .unwrap_or_default()
 }
 
-fn extract_pr_visible_body(document: &Html, selectors: &Selectors) -> String {
+fn extract_pr_visible_body(document: &Html, selectors: &Selectors, source_url: &Url) -> String {
     document
         .select(&selectors.pr_body)
         .next()
-        .map(render_element_blocks)
+        .map(|element| render_element_blocks(element, Some(source_url)))
         .unwrap_or_default()
+}
+
+fn extract_issue_visible_discussion(
+    document: &Html,
+    selectors: &Selectors,
+    source_url: &Url,
+) -> Vec<DiscussionEntry> {
+    document
+        .select(&selectors.issue_comment_container)
+        .filter_map(|container| extract_visible_discussion_entry(container, selectors, source_url))
+        .collect()
+}
+
+fn extract_pr_visible_discussion(
+    document: &Html,
+    selectors: &Selectors,
+    source_url: &Url,
+) -> Vec<DiscussionEntry> {
+    let main_body_id = document.select(&selectors.pr_body).next().map(|body| body.id());
+    document
+        .select(&selectors.pr_discussion_container)
+        .filter(|container| {
+            let Some(main_body_id) = main_body_id else {
+                return true;
+            };
+            container
+                .select(&selectors.pr_body)
+                .next()
+                .map(|body| body.id() != main_body_id)
+                .unwrap_or(true)
+        })
+        .filter_map(|container| extract_visible_discussion_entry(container, selectors, source_url))
+        .collect()
+}
+
+fn extract_visible_discussion_entry(
+    container: ElementRef<'_>,
+    selectors: &Selectors,
+    source_url: &Url,
+) -> Option<DiscussionEntry> {
+    let body = container
+        .select(&selectors.visible_discussion_body)
+        .next()
+        .map(|element| render_element_blocks(element, Some(source_url)))
+        .filter(|text| !text.trim().is_empty())?;
+
+    Some(DiscussionEntry {
+        author: container
+            .select(&selectors.visible_discussion_author)
+            .next()
+            .map(|value| normalize_inline(&value.text().collect::<String>()))
+            .filter(|value| !value.is_empty()),
+        published: container
+            .select(&selectors.relative_time)
+            .next()
+            .and_then(|value| value.value().attr("datetime"))
+            .map(normalize_inline)
+            .filter(|value| !value.is_empty()),
+        body: normalize_multiline(&body),
+    })
 }
 
 fn extract_issue_visible_author(document: &Html, selectors: &Selectors) -> Option<String> {
@@ -590,8 +813,15 @@ fn build_selectors() -> Result<Selectors, String> {
         issue_container: parse_selector("[data-testid='issue-viewer-issue-container']")?,
         issue_body: parse_selector("[data-testid='issue-body-viewer'] .markdown-body")?,
         issue_author: parse_selector("a[data-testid='issue-body-header-author']")?,
+        issue_comment_container: parse_selector("[data-wrapper-timeline-id] .react-issue-comment")?,
         pr_body: parse_selector(".comment-body.markdown-body")?,
         pr_author: parse_selector(".gh-header-meta .author, .timeline-comment .author")?,
+        pr_discussion_container: parse_selector(".timeline-comment, .review-comment")?,
+        visible_discussion_body: parse_selector(".markdown-body, .comment-body.markdown-body")?,
+        visible_discussion_author: parse_selector(
+            ".ActivityHeader-module__AuthorLink--iofTU, a[data-testid='avatar-link'], \
+             a[data-testid='issue-body-header-author'], .author, a[href^='/'][data-hovercard-url*='/users/']",
+        )?,
         relative_time: parse_selector("relative-time")?,
         release_section: parse_selector("section[aria-labelledby]")?,
         release_title: parse_selector("a[href*='/releases/tag/']")?,

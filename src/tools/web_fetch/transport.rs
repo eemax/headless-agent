@@ -19,6 +19,11 @@ use super::{
 
 const DNS_RESOLVER_WORKERS: usize = 4;
 const DNS_RESOLVER_QUEUE_CAPACITY: usize = 64;
+const BROWSER_USER_AGENT: &str = concat!(
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) ",
+    "AppleWebKit/537.36 (KHTML, like Gecko) ",
+    "Chrome/135.0.0.0 Safari/537.36"
+);
 
 #[derive(Debug, Clone)]
 pub(super) struct ResolvedTarget {
@@ -45,12 +50,13 @@ pub(super) enum TransportFailureKind {
     Timeout,
     Redirect,
     Decode,
+    TooLarge,
 }
 
 #[derive(Debug, Clone)]
 pub(super) struct TransportFailure {
     pub(super) kind: TransportFailureKind,
-    pub(super) url: Option<Url>,
+    pub(super) context: FailureContext,
 }
 
 #[derive(Debug, Clone)]
@@ -280,10 +286,7 @@ impl HttpTransport for UreqTransport {
             .build();
         let response = agent
             .get(url.as_str())
-            .set(
-                "User-Agent",
-                concat!("headless/", env!("CARGO_PKG_VERSION")),
-            )
+            .set("User-Agent", BROWSER_USER_AGENT)
             .set(
                 "Accept",
                 "text/html,application/xhtml+xml,application/json,text/plain;q=0.9,*/*;q=0.8",
@@ -300,13 +303,27 @@ impl HttpTransport for UreqTransport {
             .parse::<Url>()
             .map_err(|_| TransportFailure {
                 kind: TransportFailureKind::Decode,
-                url: Some(url.clone()),
+                context: FailureContext {
+                    final_url: Some(url.to_string()),
+                    ..FailureContext::default()
+                },
             })?;
         let content_type = response.header("content-type").map(ToOwned::to_owned);
         let location = response.header("location").map(ToOwned::to_owned);
         let content_length = response
             .header("content-length")
             .and_then(|value: &str| value.parse::<u64>().ok());
+        if content_length.is_some_and(|value| value > MAX_DOWNLOAD_BYTES as u64) {
+            return Err(TransportFailure {
+                kind: TransportFailureKind::TooLarge,
+                context: FailureContext {
+                    final_url: Some(response_url.to_string()),
+                    status: Some(status),
+                    content_type: normalize_content_type(content_type.as_deref()),
+                    ..FailureContext::default()
+                },
+            });
+        }
         let mut reader = response.into_reader().take((MAX_DOWNLOAD_BYTES as u64) + 1);
         let mut body = Vec::new();
         reader
@@ -346,17 +363,14 @@ pub(super) fn fetch_with_clients(
         let response = match fetch_target(&current, deadline, transport) {
             Ok(response) => response,
             Err(error) => {
-                let final_url = error
-                    .url
-                    .map(|value| value.to_string())
-                    .or_else(|| Some(current.url.to_string()));
+                let mut context = error.context;
+                if context.final_url.is_none() {
+                    context.final_url = Some(current.url.to_string());
+                }
                 return FetchResult::failure(
                     requested_url,
                     transport_error_code(error.kind),
-                    FailureContext {
-                        final_url,
-                        ..FailureContext::default()
-                    },
+                    context,
                 );
             }
         };
@@ -408,7 +422,10 @@ fn fetch_target(
         let Some(remaining) = remaining_timeout(deadline) else {
             return Err(last_retryable.unwrap_or_else(|| TransportFailure {
                 kind: TransportFailureKind::Timeout,
-                url: Some(target.url.clone()),
+                context: FailureContext {
+                    final_url: Some(target.url.to_string()),
+                    ..FailureContext::default()
+                },
             }));
         };
         match transport.get(&target.url, address, remaining) {
@@ -420,7 +437,10 @@ fn fetch_target(
 
     Err(last_retryable.unwrap_or_else(|| TransportFailure {
         kind: TransportFailureKind::Connect,
-        url: Some(target.url.clone()),
+        context: FailureContext {
+            final_url: Some(target.url.to_string()),
+            ..FailureContext::default()
+        },
     }))
 }
 
@@ -615,7 +635,14 @@ fn map_transport_error(error: ureq::Transport, fallback_url: Option<Url>) -> Tra
     };
     TransportFailure {
         kind,
-        url: error.url().cloned().or(fallback_url),
+        context: FailureContext {
+            final_url: error
+                .url()
+                .cloned()
+                .or(fallback_url)
+                .map(|value| value.to_string()),
+            ..FailureContext::default()
+        },
     }
 }
 
@@ -625,7 +652,13 @@ fn map_read_error(error: io::Error, url: Option<Url>) -> TransportFailure {
         ErrorKind::TimedOut | ErrorKind::WouldBlock => TransportFailureKind::Timeout,
         _ => TransportFailureKind::Decode,
     };
-    TransportFailure { kind, url }
+    TransportFailure {
+        kind,
+        context: FailureContext {
+            final_url: url.map(|value| value.to_string()),
+            ..FailureContext::default()
+        },
+    }
 }
 
 fn transport_error_code(kind: TransportFailureKind) -> &'static str {
@@ -635,6 +668,7 @@ fn transport_error_code(kind: TransportFailureKind) -> &'static str {
         TransportFailureKind::Timeout => "timeout",
         TransportFailureKind::Redirect => "redirect_error",
         TransportFailureKind::Decode => "decode_error",
+        TransportFailureKind::TooLarge => "content_too_large",
     }
 }
 

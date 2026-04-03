@@ -1,4 +1,5 @@
 use scraper::{ElementRef, Html};
+use url::Url;
 
 use super::{NOISY_TAGS, NOISY_TOKEN_SUBSTRINGS, content::normalize_inline};
 
@@ -40,6 +41,7 @@ struct HtmlTableRow {
 enum InlineToken {
     Text(String),
     Code(String),
+    Link { text: String, url: String },
     Break,
 }
 
@@ -49,8 +51,20 @@ pub(super) struct RenderedBody {
     pub(super) visible_len: usize,
 }
 
-pub(super) fn render_root(element: ElementRef<'_>, duplicate_title: Option<&str>) -> RenderedBody {
-    let mut blocks = prune_noise_blocks(collect_blocks_from_children(element));
+#[derive(Clone, Copy)]
+struct RenderContext<'a> {
+    base_url: Option<&'a Url>,
+}
+
+pub(super) fn render_root(
+    element: ElementRef<'_>,
+    duplicate_title: Option<&str>,
+    base_url: Option<&Url>,
+) -> RenderedBody {
+    let mut blocks = prune_noise_blocks(collect_blocks_from_children(
+        element,
+        RenderContext { base_url },
+    ));
     if let Some(title) = duplicate_title {
         suppress_duplicate_title_heading(&mut blocks, title);
     }
@@ -59,14 +73,17 @@ pub(super) fn render_root(element: ElementRef<'_>, duplicate_title: Option<&str>
     RenderedBody { text, visible_len }
 }
 
-pub(super) fn render_element_blocks(element: ElementRef<'_>) -> String {
-    let blocks = prune_noise_blocks(collect_blocks_from_children(element));
+pub(super) fn render_element_blocks(element: ElementRef<'_>, base_url: Option<&Url>) -> String {
+    let blocks = prune_noise_blocks(collect_blocks_from_children(
+        element,
+        RenderContext { base_url },
+    ));
     render_blocks(&blocks)
 }
 
-pub(super) fn render_html_fragment(html: &str) -> String {
+pub(super) fn render_html_fragment(html: &str, base_url: Option<&Url>) -> String {
     let document = Html::parse_fragment(html);
-    render_element_blocks(document.root_element())
+    render_element_blocks(document.root_element(), base_url)
 }
 
 pub(super) fn render_markdown_inline_code(code: &str) -> String {
@@ -80,6 +97,21 @@ pub(super) fn render_markdown_inline_code(code: &str) -> String {
     } else {
         format!("{delimiter}{code}{delimiter}")
     }
+}
+
+fn render_markdown_link(text: &str, url: &str) -> String {
+    format!("[{}](<{url}>)", escape_markdown_link_text(text))
+}
+
+fn escape_markdown_link_text(input: &str) -> String {
+    let mut output = String::new();
+    for ch in input.chars() {
+        if matches!(ch, '\\' | '[' | ']') {
+            output.push('\\');
+        }
+        output.push(ch);
+    }
+    output
 }
 
 pub(super) fn render_markdown_code_block(language: Option<&str>, code: &str) -> String {
@@ -133,7 +165,7 @@ pub(super) fn strip_outer_blank_lines(input: &str) -> String {
     lines[start..end].join("\n")
 }
 
-fn collect_blocks_from_children(container: ElementRef<'_>) -> Vec<HtmlBlock> {
+fn collect_blocks_from_children(container: ElementRef<'_>, context: RenderContext<'_>) -> Vec<HtmlBlock> {
     let mut blocks = Vec::new();
     let mut pending_inline = Vec::new();
 
@@ -163,14 +195,14 @@ fn collect_blocks_from_children(container: ElementRef<'_>) -> Vec<HtmlBlock> {
             continue;
         }
         if is_inline_element(tag) {
-            collect_inline_tokens_from_element(&element, &mut pending_inline);
+            collect_inline_tokens_from_element(&element, &mut pending_inline, context);
             continue;
         }
 
         flush_pending_inline(&mut pending_inline, &mut blocks);
         match tag {
             "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
-                let text = render_inline_content(&element);
+                let text = render_inline_content(&element, context);
                 if !text.is_empty() {
                     blocks.push(HtmlBlock::Heading {
                         level: heading_level(tag),
@@ -179,13 +211,13 @@ fn collect_blocks_from_children(container: ElementRef<'_>) -> Vec<HtmlBlock> {
                 }
             }
             "p" | "figcaption" => {
-                let text = render_inline_content(&element);
+                let text = render_inline_content(&element, context);
                 if !text.is_empty() {
                     blocks.push(HtmlBlock::Paragraph(text));
                 }
             }
             "ul" | "ol" => {
-                let items = collect_list_items(&element);
+                let items = collect_list_items(&element, context);
                 if !items.is_empty() {
                     blocks.push(HtmlBlock::List {
                         ordered: tag == "ol",
@@ -194,9 +226,9 @@ fn collect_blocks_from_children(container: ElementRef<'_>) -> Vec<HtmlBlock> {
                 }
             }
             "blockquote" => {
-                let mut quote_blocks = collect_blocks_from_children(element);
+                let mut quote_blocks = collect_blocks_from_children(element, context);
                 if quote_blocks.is_empty() {
-                    let text = render_inline_content(&element);
+                    let text = render_inline_content(&element, context);
                     if !text.is_empty() {
                         quote_blocks.push(HtmlBlock::Paragraph(text));
                     }
@@ -210,12 +242,12 @@ fn collect_blocks_from_children(container: ElementRef<'_>) -> Vec<HtmlBlock> {
                     blocks.push(block);
                 }
             }
-            "table" => blocks.extend(collect_table_blocks(&element)),
+            "table" => blocks.extend(collect_table_blocks(&element, context)),
             _ => {
                 if has_meaningful_block_children(&element) {
-                    blocks.extend(collect_blocks_from_children(element));
+                    blocks.extend(collect_blocks_from_children(element, context));
                 } else {
-                    let text = render_inline_content(&element);
+                    let text = render_inline_content(&element, context);
                     if !text.is_empty() {
                         blocks.push(HtmlBlock::Paragraph(text));
                     }
@@ -277,7 +309,11 @@ fn flush_pending_inline(tokens: &mut Vec<InlineToken>, blocks: &mut Vec<HtmlBloc
     }
 }
 
-fn collect_inline_tokens_from_element(element: &ElementRef<'_>, tokens: &mut Vec<InlineToken>) {
+fn collect_inline_tokens_from_element(
+    element: &ElementRef<'_>,
+    tokens: &mut Vec<InlineToken>,
+    context: RenderContext<'_>,
+) {
     if is_noisy_element(element) || is_code_chrome_element(element) {
         return;
     }
@@ -291,25 +327,36 @@ fn collect_inline_tokens_from_element(element: &ElementRef<'_>, tokens: &mut Vec
                 tokens.push(InlineToken::Code(code));
             }
         }
+        "a" => {
+            let text = normalize_inline(&render_inline_content(element, context));
+            if text.is_empty() {
+                return;
+            }
+            if let Some(url) = resolve_anchor_href(element, context.base_url) {
+                tokens.push(InlineToken::Link { text, url });
+            } else {
+                tokens.push(InlineToken::Text(text));
+            }
+        }
         _ => {
             for child in element.children() {
                 if let Some(text) = child.value().as_text() {
                     tokens.push(InlineToken::Text(text.to_string()));
                 } else if let Some(child_element) = ElementRef::wrap(child) {
-                    collect_inline_tokens_from_element(&child_element, tokens);
+                    collect_inline_tokens_from_element(&child_element, tokens, context);
                 }
             }
         }
     }
 }
 
-fn render_inline_content(element: &ElementRef<'_>) -> String {
+fn render_inline_content(element: &ElementRef<'_>, context: RenderContext<'_>) -> String {
     let mut tokens = Vec::new();
     for child in element.children() {
         if let Some(text) = child.value().as_text() {
             tokens.push(InlineToken::Text(text.to_string()));
         } else if let Some(child_element) = ElementRef::wrap(child) {
-            collect_inline_tokens_from_element(&child_element, &mut tokens);
+            collect_inline_tokens_from_element(&child_element, &mut tokens, context);
         }
     }
     render_inline_tokens(&tokens)
@@ -341,6 +388,13 @@ fn render_inline_tokens(tokens: &[InlineToken]) -> String {
                 output.push_str(&render_markdown_inline_code(code));
                 pending_space = false;
             }
+            InlineToken::Link { text, url } => {
+                if pending_space && !output.is_empty() && !output.ends_with('\n') {
+                    output.push(' ');
+                }
+                output.push_str(&render_markdown_link(text, url));
+                pending_space = false;
+            }
             InlineToken::Break => {
                 trim_trailing_spaces(&mut output);
                 if !output.ends_with('\n') {
@@ -358,6 +412,21 @@ fn trim_trailing_spaces(value: &mut String) {
     while value.ends_with(' ') {
         value.pop();
     }
+}
+
+fn resolve_anchor_href(element: &ElementRef<'_>, base_url: Option<&Url>) -> Option<String> {
+    let href = element.value().attr("href")?.trim();
+    if href.is_empty() || href.starts_with('#') {
+        return None;
+    }
+
+    if let Ok(url) = Url::parse(href) {
+        return matches!(url.scheme(), "http" | "https").then(|| url.to_string());
+    }
+
+    let base_url = base_url?;
+    let resolved = base_url.join(href).ok()?;
+    matches!(resolved.scheme(), "http" | "https").then(|| resolved.to_string())
 }
 
 fn normalize_inline_code(input: &str) -> String {
@@ -438,11 +507,11 @@ fn heading_level(tag: &str) -> usize {
         .clamp(1, 6)
 }
 
-fn collect_list_items(list: &ElementRef<'_>) -> Vec<HtmlListItem> {
+fn collect_list_items(list: &ElementRef<'_>, context: RenderContext<'_>) -> Vec<HtmlListItem> {
     list.child_elements()
         .filter(|element| element.value().name() == "li")
         .filter_map(|item| {
-            let blocks = collect_blocks_from_children(item);
+            let blocks = collect_blocks_from_children(item, context);
             if blocks.is_empty() {
                 None
             } else {
@@ -648,9 +717,9 @@ fn element_has_token(element: &ElementRef<'_>, needle: &str) -> bool {
     })
 }
 
-fn collect_table_blocks(table: &ElementRef<'_>) -> Vec<HtmlBlock> {
-    let Some(rows) = collect_table_rows(table) else {
-        return fallback_table_blocks(table);
+fn collect_table_blocks(table: &ElementRef<'_>, context: RenderContext<'_>) -> Vec<HtmlBlock> {
+    let Some(rows) = collect_table_rows(table, context) else {
+        return fallback_table_blocks(table, context);
     };
     if rows.is_empty() {
         return Vec::new();
@@ -658,7 +727,7 @@ fn collect_table_blocks(table: &ElementRef<'_>) -> Vec<HtmlBlock> {
 
     let width = rows[0].cells.len();
     if width == 0 || rows.iter().any(|row| row.cells.len() != width) {
-        return fallback_table_blocks(table);
+        return fallback_table_blocks(table, context);
     }
 
     let mut header_index = None;
@@ -669,7 +738,7 @@ fn collect_table_blocks(table: &ElementRef<'_>) -> Vec<HtmlBlock> {
     }
 
     let Some(header_index) = header_index else {
-        return fallback_table_blocks(table);
+        return fallback_table_blocks(table, context);
     };
 
     let headers = rows[header_index].cells.clone();
@@ -685,7 +754,7 @@ fn collect_table_blocks(table: &ElementRef<'_>) -> Vec<HtmlBlock> {
     }]
 }
 
-fn collect_table_rows(table: &ElementRef<'_>) -> Option<Vec<HtmlTableRow>> {
+fn collect_table_rows(table: &ElementRef<'_>, context: RenderContext<'_>) -> Option<Vec<HtmlTableRow>> {
     let mut rows = Vec::new();
 
     for child in table.child_elements() {
@@ -696,10 +765,10 @@ fn collect_table_rows(table: &ElementRef<'_>) -> Option<Vec<HtmlTableRow>> {
                     .child_elements()
                     .filter(|row| row.value().name() == "tr")
                 {
-                    rows.push(collect_table_row(&row, in_head)?);
+                    rows.push(collect_table_row(&row, in_head, context)?);
                 }
             }
-            "tr" => rows.push(collect_table_row(&child, false)?),
+            "tr" => rows.push(collect_table_row(&child, false, context)?),
             _ => {}
         }
     }
@@ -707,7 +776,11 @@ fn collect_table_rows(table: &ElementRef<'_>) -> Option<Vec<HtmlTableRow>> {
     Some(rows)
 }
 
-fn collect_table_row(row: &ElementRef<'_>, in_head: bool) -> Option<HtmlTableRow> {
+fn collect_table_row(
+    row: &ElementRef<'_>,
+    in_head: bool,
+    context: RenderContext<'_>,
+) -> Option<HtmlTableRow> {
     let cells = row
         .child_elements()
         .filter(|cell| matches!(cell.value().name(), "td" | "th"))
@@ -722,13 +795,16 @@ fn collect_table_row(row: &ElementRef<'_>, in_head: bool) -> Option<HtmlTableRow
     }
 
     Some(HtmlTableRow {
-        cells: cells.iter().map(render_inline_content).collect(),
+        cells: cells
+            .iter()
+            .map(|cell| render_inline_content(cell, context))
+            .collect(),
         all_header: cells.iter().all(|cell| cell.value().name() == "th"),
         in_head,
     })
 }
 
-fn fallback_table_blocks(table: &ElementRef<'_>) -> Vec<HtmlBlock> {
+fn fallback_table_blocks(table: &ElementRef<'_>, context: RenderContext<'_>) -> Vec<HtmlBlock> {
     let mut blocks = Vec::new();
     for row in table
         .descendent_elements()
@@ -737,7 +813,7 @@ fn fallback_table_blocks(table: &ElementRef<'_>) -> Vec<HtmlBlock> {
         let cells = row
             .child_elements()
             .filter(|cell| matches!(cell.value().name(), "td" | "th"))
-            .map(|cell| render_inline_content(&cell))
+            .map(|cell| render_inline_content(&cell, context))
             .filter(|value| !value.is_empty())
             .collect::<Vec<_>>();
         if !cells.is_empty() {

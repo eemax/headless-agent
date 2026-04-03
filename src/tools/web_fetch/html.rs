@@ -2,6 +2,7 @@ use std::sync::OnceLock;
 
 use scraper::{ElementRef, Html, Selector};
 use serde_json::Value;
+use url::Url;
 
 use super::{
     ExtractionKind, MIN_CONTENT_CHARS, Warning,
@@ -9,7 +10,7 @@ use super::{
         ExtractedContent, normalize_content_type, normalize_inline, push_warning, truncate_chars,
         warning_list,
     },
-    render::{render_root, strip_outer_blank_lines, unmatched_markdown_code_fence},
+    render::{RenderedBody, render_root, strip_outer_blank_lines, unmatched_markdown_code_fence},
     sites::{self, SiteExtraction},
 };
 
@@ -67,6 +68,26 @@ struct SchemaInfo {
 struct RootSelection<'a> {
     element: ElementRef<'a>,
     kind: ExtractionKind,
+    source: RootSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RootSource {
+    Main,
+    Article,
+    RoleMain,
+    IdContent,
+    IdMain,
+    ClassContent,
+    Body,
+}
+
+#[derive(Clone)]
+struct RootCandidate<'a> {
+    root: RootSelection<'a>,
+    rendered: RenderedBody,
+    score: f64,
+    low_signal: bool,
 }
 
 pub(super) fn extract_html(
@@ -91,9 +112,10 @@ pub(super) fn extract_html(
     };
 
     let document = Html::parse_document(html);
+    let parsed_source_url = source_url.and_then(|value| Url::parse(value).ok());
     let schema = extract_schema_info(&document, selectors);
     let site = sites::extract(source_url, &document);
-    let root = select_root(&document, selectors);
+    let root = select_best_root(&document, selectors, parsed_source_url.as_ref());
     let metadata = extract_metadata(&document, selectors, &root, &schema, site.as_ref());
 
     let displayed_title = metadata
@@ -101,15 +123,19 @@ pub(super) fn extract_html(
         .as_deref()
         .or(metadata.h1.as_deref())
         .map(ToOwned::to_owned);
-    let rendered = render_root(root.element, displayed_title.as_deref());
+    let rendered = render_root(root.element, displayed_title.as_deref(), parsed_source_url.as_ref());
     let dom_body_text = rendered.text;
     let body_visible_text_len = rendered.visible_len;
-    let low_signal = is_low_signal_extraction(&dom_body_text, body_visible_text_len, html.len());
-    let rescued_body = site
+    let low_signal = is_low_signal_extraction(
+        &dom_body_text,
+        body_visible_text_len,
+        root.element.html().len(),
+    );
+    let rescued_site_body = site
         .as_ref()
         .filter(|value| !value.body.trim().is_empty())
-        .map(|value| normalize_schema_text(&value.body))
-        .or_else(|| {
+        .map(|value| normalize_schema_text(&value.body));
+    let rescued_body = rescued_site_body.clone().or_else(|| {
             select_schema_fallback(&dom_body_text, body_visible_text_len, low_signal, &schema)
         });
     let used_rescue = rescued_body.is_some();
@@ -145,7 +171,11 @@ pub(super) fn extract_html(
     }
 
     ExtractedContent {
-        kind: root.kind,
+        kind: if rescued_site_body.is_some() {
+            ExtractionKind::HtmlPrimary
+        } else {
+            root.kind
+        },
         content_type: normalize_content_type(content_type_header)
             .or_else(|| Some("text/html".to_string())),
         content,
@@ -447,51 +477,212 @@ fn truncate_rendered_content(input: &str, limit: usize) -> (String, bool) {
     (output, true)
 }
 
-fn select_root<'a>(document: &'a Html, selectors: &'a Selectors) -> RootSelection<'a> {
-    if let Some(element) = document.select(&selectors.main).next() {
+fn select_best_root<'a>(
+    document: &'a Html,
+    selectors: &'a Selectors,
+    base_url: Option<&Url>,
+) -> RootSelection<'a> {
+    let mut candidates = collect_root_candidates(document, selectors, base_url);
+    if candidates.is_empty() {
         return RootSelection {
-            element,
-            kind: ExtractionKind::HtmlPrimary,
+            element: document
+                .select(&selectors.body)
+                .next()
+                .or_else(|| document.root_element().select(&selectors.body).next())
+                .unwrap_or_else(|| document.root_element()),
+            kind: ExtractionKind::HtmlFallback,
+            source: RootSource::Body,
         };
     }
-    if let Some(element) = document.select(&selectors.article).next() {
-        return RootSelection {
-            element,
-            kind: ExtractionKind::HtmlPrimary,
-        };
+
+    candidates.sort_by(|left, right| {
+        right
+            .score
+            .total_cmp(&left.score)
+            .then_with(|| right.rendered.visible_len.cmp(&left.rendered.visible_len))
+    });
+
+    candidates
+        .iter()
+        .find(|candidate| !candidate.low_signal)
+        .unwrap_or(&candidates[0])
+        .root
+        .clone()
+}
+
+fn collect_root_candidates<'a>(
+    document: &'a Html,
+    selectors: &'a Selectors,
+    base_url: Option<&Url>,
+) -> Vec<RootCandidate<'a>> {
+    let mut roots = Vec::new();
+    let mut seen = Vec::new();
+
+    for (selector, source) in [
+        (&selectors.main, RootSource::Main),
+        (&selectors.article, RootSource::Article),
+        (&selectors.role_main, RootSource::RoleMain),
+        (&selectors.id_content, RootSource::IdContent),
+        (&selectors.id_main, RootSource::IdMain),
+        (&selectors.class_content, RootSource::ClassContent),
+    ] {
+        for element in document.select(selector) {
+            let element_id = element.id();
+            if seen.contains(&element_id) {
+                continue;
+            }
+            seen.push(element_id);
+            roots.push(RootSelection {
+                element,
+                kind: ExtractionKind::HtmlPrimary,
+                source,
+            });
+        }
     }
-    if let Some(element) = document.select(&selectors.role_main).next() {
-        return RootSelection {
-            element,
-            kind: ExtractionKind::HtmlPrimary,
-        };
+
+    if let Some(element) = document
+        .select(&selectors.body)
+        .next()
+        .or_else(|| document.root_element().select(&selectors.body).next())
+    {
+        if !seen.contains(&element.id()) {
+            roots.push(RootSelection {
+                element,
+                kind: ExtractionKind::HtmlFallback,
+                source: RootSource::Body,
+            });
+        }
+    } else {
+        roots.push(RootSelection {
+            element: document.root_element(),
+            kind: ExtractionKind::HtmlFallback,
+            source: RootSource::Body,
+        });
     }
-    if let Some(element) = document.select(&selectors.id_content).next() {
-        return RootSelection {
-            element,
-            kind: ExtractionKind::HtmlPrimary,
-        };
+
+    let mut candidates = roots
+        .into_iter()
+        .map(|root| evaluate_root_candidate(root, base_url))
+        .collect::<Vec<_>>();
+    dedupe_nested_candidates(&mut candidates);
+    candidates
+}
+
+fn evaluate_root_candidate<'a>(
+    root: RootSelection<'a>,
+    base_url: Option<&Url>,
+) -> RootCandidate<'a> {
+    let rendered = render_root(root.element, None, base_url);
+    let raw_html_len = root.element.html().len();
+    let low_signal = is_low_signal_extraction(&rendered.text, rendered.visible_len, raw_html_len);
+    let visible_len = rendered.visible_len.max(1) as f64;
+    let raw_html_len = raw_html_len.max(1) as f64;
+    let yield_ratio = visible_len / raw_html_len;
+    let paragraph_count = root
+        .element
+        .descendent_elements()
+        .filter(|element| matches!(element.value().name(), "p" | "figcaption"))
+        .count();
+    let list_item_count = root
+        .element
+        .descendent_elements()
+        .filter(|element| element.value().name() == "li")
+        .count();
+    let code_block_count = root
+        .element
+        .descendent_elements()
+        .filter(|element| element.value().name() == "pre")
+        .count();
+    let table_count = root
+        .element
+        .descendent_elements()
+        .filter(|element| element.value().name() == "table")
+        .count();
+    let link_text_len = root
+        .element
+        .descendent_elements()
+        .filter(|element| element.value().name() == "a")
+        .map(|element| normalize_inline(&element.text().collect::<String>()).chars().count())
+        .sum::<usize>() as f64;
+    let link_density = (link_text_len / visible_len).clamp(0.0, 1.0);
+    let noise_penalty = noisy_token_penalty(root.element);
+    let body_penalty = matches!(root.source, RootSource::Body).then_some(120.0).unwrap_or(0.0);
+    let low_signal_penalty = low_signal.then_some(140.0).unwrap_or(0.0);
+    let score = visible_len
+        + (paragraph_count as f64 * 18.0)
+        + (list_item_count as f64 * 8.0)
+        + (code_block_count as f64 * 30.0)
+        + (table_count as f64 * 20.0)
+        + (yield_ratio * 220.0)
+        - (link_density * 160.0)
+        - noise_penalty
+        - body_penalty
+        - low_signal_penalty;
+
+    RootCandidate {
+        root,
+        rendered,
+        score,
+        low_signal,
     }
-    if let Some(element) = document.select(&selectors.id_main).next() {
-        return RootSelection {
-            element,
-            kind: ExtractionKind::HtmlPrimary,
-        };
+}
+
+fn dedupe_nested_candidates(candidates: &mut Vec<RootCandidate<'_>>) {
+    let mut keep = vec![true; candidates.len()];
+    for outer_index in 0..candidates.len() {
+        if !keep[outer_index] {
+            continue;
+        }
+        if matches!(candidates[outer_index].root.source, RootSource::Body) {
+            continue;
+        }
+        for inner_index in 0..candidates.len() {
+            if outer_index == inner_index || !keep[inner_index] {
+                continue;
+            }
+            if matches!(candidates[inner_index].root.source, RootSource::Body) {
+                continue;
+            }
+            let outer = &candidates[outer_index];
+            let inner = &candidates[inner_index];
+            if is_same_or_ancestor(outer.root.element, inner.root.element)
+                && inner.rendered.visible_len.saturating_mul(100)
+                    >= outer.rendered.visible_len.saturating_mul(85)
+            {
+                keep[outer_index] = false;
+                break;
+            }
+        }
     }
-    if let Some(element) = document.select(&selectors.class_content).next() {
-        return RootSelection {
-            element,
-            kind: ExtractionKind::HtmlPrimary,
-        };
+
+    let mut index = 0usize;
+    candidates.retain(|_| {
+        let retained = keep[index];
+        index += 1;
+        retained
+    });
+}
+
+fn is_same_or_ancestor(ancestor: ElementRef<'_>, descendant: ElementRef<'_>) -> bool {
+    descendant
+        .ancestors()
+        .filter_map(ElementRef::wrap)
+        .any(|element| element.id() == ancestor.id())
+}
+
+fn noisy_token_penalty(element: ElementRef<'_>) -> f64 {
+    let mut penalty = 0.0;
+    for attr in ["class", "id"] {
+        if let Some(value) = element.value().attr(attr) {
+            let lowered = value.to_ascii_lowercase();
+            for needle in super::NOISY_TOKEN_SUBSTRINGS {
+                if lowered.contains(needle) {
+                    penalty += 35.0;
+                }
+            }
+        }
     }
-    RootSelection {
-        element: document
-            .select(&selectors.body)
-            .next()
-            .or_else(|| document.root_element().select(&selectors.body).next())
-            .unwrap_or_else(|| document.root_element()),
-        kind: ExtractionKind::HtmlFallback,
-    }
+    penalty
 }
 
 fn selectors() -> Result<&'static Selectors, String> {
