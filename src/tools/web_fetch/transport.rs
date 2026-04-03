@@ -3,6 +3,8 @@ use std::{
     error::Error as _,
     io::Read,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs},
+    sync::mpsc,
+    thread,
     time::{Duration, Instant},
 };
 
@@ -48,7 +50,8 @@ pub(super) struct TransportFailure {
 }
 
 pub(super) trait DnsResolver {
-    fn resolve(&self, host: &str, port: u16) -> std::io::Result<Vec<SocketAddr>>;
+    fn resolve(&self, host: &str, port: u16, timeout: Duration)
+    -> std::io::Result<Vec<SocketAddr>>;
 }
 
 pub(super) trait HttpTransport {
@@ -64,8 +67,33 @@ pub(super) struct StdDnsResolver;
 pub(super) struct UreqTransport;
 
 impl DnsResolver for StdDnsResolver {
-    fn resolve(&self, host: &str, port: u16) -> std::io::Result<Vec<SocketAddr>> {
-        (host, port).to_socket_addrs().map(|iter| iter.collect())
+    fn resolve(
+        &self,
+        host: &str,
+        port: u16,
+        timeout: Duration,
+    ) -> std::io::Result<Vec<SocketAddr>> {
+        let host = host.to_string();
+        let worker_host = host.clone();
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let result = (worker_host.as_str(), port)
+                .to_socket_addrs()
+                .map(|iter| iter.collect());
+            let _ = sender.send(result);
+        });
+
+        match receiver.recv_timeout(timeout) {
+            Ok(result) => result,
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("dns lookup timed out for `{host}`"),
+            )),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("dns lookup worker disconnected for `{host}`"),
+            )),
+        }
     }
 }
 
@@ -144,7 +172,7 @@ pub(super) fn fetch_with_clients(
     transport: &dyn HttpTransport,
 ) -> FetchResult {
     let deadline = Instant::now() + timeout;
-    let mut current = match resolve_target(requested_url, resolver) {
+    let mut current = match resolve_target(requested_url, resolver, deadline) {
         Ok(target) => target,
         Err(result) => return result,
     };
@@ -220,6 +248,7 @@ pub(super) fn fetch_with_clients(
                 resolver,
                 requested_url,
                 Some(response.url.to_string()),
+                deadline,
             ) {
                 Ok(target) => target,
                 Err(result) => return result,
@@ -358,7 +387,11 @@ fn build_fetch_result(requested_url: &str, response: TransportResponse) -> Fetch
     result
 }
 
-fn resolve_target(input: &str, resolver: &dyn DnsResolver) -> Result<ResolvedTarget, FetchResult> {
+fn resolve_target(
+    input: &str,
+    resolver: &dyn DnsResolver,
+    deadline: Instant,
+) -> Result<ResolvedTarget, FetchResult> {
     let url = match Url::parse(input) {
         Ok(url) => url,
         Err(_) => {
@@ -375,7 +408,7 @@ fn resolve_target(input: &str, resolver: &dyn DnsResolver) -> Result<ResolvedTar
             ));
         }
     };
-    resolve_target_url(url, resolver, input, None)
+    resolve_target_url(url, resolver, input, None, deadline)
 }
 
 fn resolve_target_url(
@@ -383,6 +416,7 @@ fn resolve_target_url(
     resolver: &dyn DnsResolver,
     requested_url: &str,
     final_url: Option<String>,
+    deadline: Instant,
 ) -> Result<ResolvedTarget, FetchResult> {
     if !matches!(url.scheme(), "http" | "https") {
         return Err(FetchResult::failure(
@@ -431,9 +465,8 @@ fn resolve_target_url(
     let addresses = match host {
         Host::Ipv4(addr) => vec![SocketAddr::new(IpAddr::V4(addr), port)],
         Host::Ipv6(addr) => vec![SocketAddr::new(IpAddr::V6(addr), port)],
-        Host::Domain(_) => match resolver.resolve(&host_string, port) {
-            Ok(addresses) if !addresses.is_empty() => addresses,
-            _ => {
+        Host::Domain(_) => {
+            let Some(timeout) = remaining_timeout(deadline) else {
                 return Err(FetchResult::failure(
                     requested_url,
                     final_url,
@@ -441,12 +474,41 @@ fn resolve_target_url(
                     None,
                     String::new(),
                     Vec::new(),
-                    "dns_error",
+                    "timeout",
                     false,
                     0,
                 ));
+            };
+            match resolver.resolve(&host_string, port, timeout) {
+                Ok(addresses) if !addresses.is_empty() => addresses,
+                Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {
+                    return Err(FetchResult::failure(
+                        requested_url,
+                        final_url,
+                        None,
+                        None,
+                        String::new(),
+                        Vec::new(),
+                        "timeout",
+                        false,
+                        0,
+                    ));
+                }
+                _ => {
+                    return Err(FetchResult::failure(
+                        requested_url,
+                        final_url,
+                        None,
+                        None,
+                        String::new(),
+                        Vec::new(),
+                        "dns_error",
+                        false,
+                        0,
+                    ));
+                }
             }
-        },
+        }
     };
 
     if addresses.iter().any(|value| is_blocked_ip(value.ip())) {
@@ -549,6 +611,9 @@ fn is_blocked_ipv4(ip: Ipv4Addr) -> bool {
 }
 
 fn is_blocked_ipv6(ip: Ipv6Addr) -> bool {
+    if let Some(mapped) = ip.to_ipv4_mapped() {
+        return is_blocked_ipv4(mapped);
+    }
     if ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() {
         return true;
     }

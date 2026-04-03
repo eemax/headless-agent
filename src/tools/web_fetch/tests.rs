@@ -22,21 +22,82 @@ use super::{
 
 #[derive(Default)]
 struct FakeResolver {
-    values: HashMap<(String, u16), io::Result<Vec<SocketAddr>>>,
+    values: HashMap<(String, u16), FakeDnsEntry>,
+}
+
+#[derive(Debug, Clone)]
+struct FakeDnsEntry {
+    required_budget: Duration,
+    outcome: FakeDnsOutcome,
+}
+
+#[derive(Debug, Clone)]
+enum FakeDnsOutcome {
+    Addresses(Vec<SocketAddr>),
+    Error {
+        kind: io::ErrorKind,
+        message: String,
+    },
 }
 
 impl FakeResolver {
     fn with_mapping(mut self, host: &str, port: u16, addresses: Vec<SocketAddr>) -> Self {
-        self.values.insert((host.to_string(), port), Ok(addresses));
+        self.values.insert(
+            (host.to_string(), port),
+            FakeDnsEntry {
+                required_budget: Duration::ZERO,
+                outcome: FakeDnsOutcome::Addresses(addresses),
+            },
+        );
+        self
+    }
+
+    fn with_budgeted_mapping(
+        mut self,
+        host: &str,
+        port: u16,
+        required_budget: Duration,
+        addresses: Vec<SocketAddr>,
+    ) -> Self {
+        self.values.insert(
+            (host.to_string(), port),
+            FakeDnsEntry {
+                required_budget,
+                outcome: FakeDnsOutcome::Addresses(addresses),
+            },
+        );
+        self
+    }
+
+    fn with_error(mut self, host: &str, port: u16, kind: io::ErrorKind, message: &str) -> Self {
+        self.values.insert(
+            (host.to_string(), port),
+            FakeDnsEntry {
+                required_budget: Duration::ZERO,
+                outcome: FakeDnsOutcome::Error {
+                    kind,
+                    message: message.to_string(),
+                },
+            },
+        );
         self
     }
 }
 
 impl DnsResolver for FakeResolver {
-    fn resolve(&self, host: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
+    fn resolve(&self, host: &str, port: u16, timeout: Duration) -> io::Result<Vec<SocketAddr>> {
         match self.values.get(&(host.to_string(), port)) {
-            Some(Ok(addresses)) => Ok(addresses.clone()),
-            Some(Err(error)) => Err(io::Error::new(error.kind(), error.to_string())),
+            Some(entry) => {
+                if timeout < entry.required_budget {
+                    return Err(io::Error::new(io::ErrorKind::TimedOut, "fake dns timeout"));
+                }
+                match &entry.outcome {
+                    FakeDnsOutcome::Addresses(addresses) => Ok(addresses.clone()),
+                    FakeDnsOutcome::Error { kind, message } => {
+                        Err(io::Error::new(*kind, message.clone()))
+                    }
+                }
+            }
             None => Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 "missing fake dns entry",
@@ -105,6 +166,10 @@ fn socket_v6(segments: [u16; 8], port: u16) -> SocketAddr {
     )
 }
 
+fn socket_v4_mapped(a: u8, b: u8, c: u8, d: u8, port: u16) -> SocketAddr {
+    SocketAddr::new(IpAddr::V6(Ipv4Addr::new(a, b, c, d).to_ipv6_mapped()), port)
+}
+
 fn response(url: &str, status: u16, content_type: Option<&str>, body: &[u8]) -> TransportResponse {
     TransportResponse {
         url: Url::parse(url).expect("url"),
@@ -132,6 +197,56 @@ fn blocks_loopback_hosts() {
     let transport = FakeTransport::default();
     let result = fetch_with_clients(
         "http://localhost/path",
+        REQUEST_TIMEOUT,
+        &resolver,
+        &transport,
+    );
+    assert_eq!(result.error.as_deref(), Some("blocked_address"));
+    assert!(!result.ok);
+}
+
+#[test]
+fn blocks_ipv4_mapped_ipv6_loopback_literals() {
+    let resolver = FakeResolver::default();
+    let transport = FakeTransport::default();
+    let result = fetch_with_clients(
+        "http://[::ffff:127.0.0.1]:9/",
+        REQUEST_TIMEOUT,
+        &resolver,
+        &transport,
+    );
+    assert_eq!(result.error.as_deref(), Some("blocked_address"));
+    assert!(!result.ok);
+}
+
+#[test]
+fn blocks_resolved_ipv4_mapped_ipv6_private_addresses() {
+    let resolver = FakeResolver::default().with_mapping(
+        "example.test",
+        443,
+        vec![socket_v4_mapped(10, 0, 0, 7, 443)],
+    );
+    let transport = FakeTransport::default();
+    let result = fetch_with_clients(
+        "https://example.test/",
+        REQUEST_TIMEOUT,
+        &resolver,
+        &transport,
+    );
+    assert_eq!(result.error.as_deref(), Some("blocked_address"));
+    assert!(!result.ok);
+}
+
+#[test]
+fn blocks_resolved_ipv4_mapped_ipv6_link_local_addresses() {
+    let resolver = FakeResolver::default().with_mapping(
+        "example.test",
+        80,
+        vec![socket_v4_mapped(169, 254, 169, 254, 80)],
+    );
+    let transport = FakeTransport::default();
+    let result = fetch_with_clients(
+        "http://example.test/",
         REQUEST_TIMEOUT,
         &resolver,
         &transport,
@@ -210,6 +325,48 @@ fn follows_redirects_and_re_resolves_last_url() {
     assert!(result.content.contains("Title: Docs"));
     assert!(!result.content.contains("# Docs"));
     assert!(result.content.contains("Hello world."));
+}
+
+#[test]
+fn dns_resolution_timeout_returns_structured_timeout() {
+    let resolver = FakeResolver::default().with_budgeted_mapping(
+        "example.test",
+        443,
+        Duration::from_millis(50),
+        vec![socket(443)],
+    );
+    let transport = FakeTransport::default();
+    let result = fetch_with_clients(
+        "https://example.test/",
+        Duration::from_millis(10),
+        &resolver,
+        &transport,
+    );
+
+    assert!(!result.ok);
+    assert_eq!(result.error.as_deref(), Some("timeout"));
+    assert_eq!(result.extraction_kind, super::ExtractionKind::Error);
+}
+
+#[test]
+fn dns_resolution_failures_stay_dns_errors() {
+    let resolver = FakeResolver::default().with_error(
+        "example.test",
+        443,
+        io::ErrorKind::Other,
+        "resolver failed",
+    );
+    let transport = FakeTransport::default();
+    let result = fetch_with_clients(
+        "https://example.test/",
+        REQUEST_TIMEOUT,
+        &resolver,
+        &transport,
+    );
+
+    assert!(!result.ok);
+    assert_eq!(result.error.as_deref(), Some("dns_error"));
+    assert_eq!(result.extraction_kind, super::ExtractionKind::Error);
 }
 
 #[test]
@@ -339,7 +496,11 @@ fn schema_fallback_replaces_low_signal_dom_content() {
         "#,
     );
 
-    assert!(result.content.contains("This article body came from schema.org"));
+    assert!(
+        result
+            .content
+            .contains("This article body came from schema.org")
+    );
     assert!(!result.warnings.contains(&Warning::LowSignalExtraction));
     assert!(!result.warnings.contains(&Warning::PossibleJsRenderedPage));
 }
@@ -369,8 +530,16 @@ fn schema_fallback_does_not_override_healthy_dom_content() {
         "#,
     );
 
-    assert!(result.content.contains("This visible article content is already healthy"));
-    assert!(!result.content.contains("Schema fallback text that should not replace"));
+    assert!(
+        result
+            .content
+            .contains("This visible article content is already healthy")
+    );
+    assert!(
+        !result
+            .content
+            .contains("Schema fallback text that should not replace")
+    );
 }
 
 #[test]
@@ -391,7 +560,11 @@ fn author_and_published_metadata_are_rendered_only_when_present() {
         "#,
     );
     assert!(with_metadata.content.contains("Author: Jane Doe"));
-    assert!(with_metadata.content.contains("Published: 2026-02-01T09:30:00Z"));
+    assert!(
+        with_metadata
+            .content
+            .contains("Published: 2026-02-01T09:30:00Z")
+    );
 
     let without_metadata = html_output(
         r#"
@@ -430,6 +603,52 @@ fn hidden_utility_classes_and_source_crumbs_are_removed() {
     assert!(!result.content.contains("secret"));
     assert!(!result.content.contains("ghost"));
     assert!(!result.content.contains("\nSource\n"));
+}
+
+#[test]
+fn hidden_style_declarations_with_spaces_are_removed() {
+    let result = html_output(
+        r#"
+        <html>
+          <body>
+            <main>
+              <div style="display: none">display hidden</div>
+              <div style="visibility: hidden">visibility hidden</div>
+              <div style="opacity: 0">opacity hidden</div>
+              <p>Keep this paragraph.</p>
+            </main>
+          </body>
+        </html>
+        "#,
+    );
+
+    assert!(result.content.contains("Keep this paragraph."));
+    assert!(!result.content.contains("display hidden"));
+    assert!(!result.content.contains("visibility hidden"));
+    assert!(!result.content.contains("opacity hidden"));
+}
+
+#[test]
+fn noisy_token_matching_avoids_mid_token_false_positives() {
+    let result = html_output(
+        r#"
+        <html>
+          <body>
+            <main>
+              <div class="canvas-panel">Canvas guidance stays visible.</div>
+              <div class="unavailable-notice">Availability notice stays visible.</div>
+            </main>
+          </body>
+        </html>
+        "#,
+    );
+
+    assert!(result.content.contains("Canvas guidance stays visible."));
+    assert!(
+        result
+            .content
+            .contains("Availability notice stays visible.")
+    );
 }
 
 #[test]
@@ -635,7 +854,11 @@ fn github_issue_embedded_data_extracts_body_author_and_published() {
         "#,
     );
 
-    assert!(result.content.contains("This issue body came from embedded GitHub data."));
+    assert!(
+        result
+            .content
+            .contains("This issue body came from embedded GitHub data.")
+    );
     assert!(result.content.contains("Author: octocat"));
     assert!(result.content.contains("Published: 2026-02-03T04:05:06Z"));
 }
@@ -662,7 +885,11 @@ fn github_pr_visible_body_fallback_extracts_body_author_and_published() {
         "#,
     );
 
-    assert!(result.content.contains("Fix the flaky test by waiting for the worker to finish."));
+    assert!(
+        result
+            .content
+            .contains("Fix the flaky test by waiting for the worker to finish.")
+    );
     assert!(result.content.contains("```rust\nassert!(done);\n```"));
     assert!(result.content.contains("Author: octocat"));
     assert!(result.content.contains("Published: 2026-03-04T05:06:07Z"));
@@ -690,6 +917,112 @@ fn json_sniffing_works_for_generic_content_type() {
     assert_eq!(result.extraction_kind, super::ExtractionKind::Json);
     assert_eq!(result.content_type.as_deref(), Some("application/json"));
     assert!(result.content.contains("\"hello\": \"world\""));
+}
+
+#[test]
+fn utf8_unicode_octet_stream_is_treated_as_text() {
+    let resolver = FakeResolver::default().with_mapping("example.test", 80, vec![socket(80)]);
+    let transport = FakeTransport::new(HashMap::from([(
+        ("http://example.test/unicode".to_string(), socket(80)),
+        Ok(response(
+            "http://example.test/unicode",
+            200,
+            Some("application/octet-stream"),
+            "こんにちは世界".as_bytes(),
+        )),
+    )]));
+    let result = fetch_with_clients(
+        "http://example.test/unicode",
+        REQUEST_TIMEOUT,
+        &resolver,
+        &transport,
+    );
+    assert!(result.ok);
+    assert_eq!(result.extraction_kind, super::ExtractionKind::Text);
+    assert_eq!(
+        result.content_type.as_deref(),
+        Some("application/octet-stream")
+    );
+    assert!(result.content.contains("こんにちは世界"));
+}
+
+#[test]
+fn octet_stream_with_nul_bytes_stays_binary() {
+    let resolver = FakeResolver::default().with_mapping("example.test", 80, vec![socket(80)]);
+    let transport = FakeTransport::new(HashMap::from([(
+        ("http://example.test/binary".to_string(), socket(80)),
+        Ok(response(
+            "http://example.test/binary",
+            200,
+            Some("application/octet-stream"),
+            b"hello\0world",
+        )),
+    )]));
+    let result = fetch_with_clients(
+        "http://example.test/binary",
+        REQUEST_TIMEOUT,
+        &resolver,
+        &transport,
+    );
+    assert!(result.ok);
+    assert_eq!(result.extraction_kind, super::ExtractionKind::BinarySummary);
+    assert!(result.content.contains("[BINARY CONTENT]"));
+}
+
+#[test]
+fn large_generic_json_body_above_sniff_cap_stays_text() {
+    let resolver = FakeResolver::default().with_mapping("example.test", 80, vec![socket(80)]);
+    let payload = format!(r#"{{"payload":"{}"}}"#, "x".repeat(300_000));
+    let transport = FakeTransport::new(HashMap::from([(
+        ("http://example.test/large-json".to_string(), socket(80)),
+        Ok(response(
+            "http://example.test/large-json",
+            200,
+            Some("application/octet-stream"),
+            payload.as_bytes(),
+        )),
+    )]));
+    let result = fetch_with_clients(
+        "http://example.test/large-json",
+        REQUEST_TIMEOUT,
+        &resolver,
+        &transport,
+    );
+    assert!(result.ok);
+    assert_eq!(result.extraction_kind, super::ExtractionKind::Text);
+    assert_eq!(
+        result.content_type.as_deref(),
+        Some("application/octet-stream")
+    );
+    assert!(result.content.starts_with("{\"payload\":\""));
+}
+
+#[test]
+fn explicit_json_content_type_still_renders_json_when_large() {
+    let resolver = FakeResolver::default().with_mapping("example.test", 80, vec![socket(80)]);
+    let payload = format!(r#"{{"payload":"{}"}}"#, "x".repeat(300_000));
+    let transport = FakeTransport::new(HashMap::from([(
+        (
+            "http://example.test/large-explicit-json".to_string(),
+            socket(80),
+        ),
+        Ok(response(
+            "http://example.test/large-explicit-json",
+            200,
+            Some("application/json"),
+            payload.as_bytes(),
+        )),
+    )]));
+    let result = fetch_with_clients(
+        "http://example.test/large-explicit-json",
+        REQUEST_TIMEOUT,
+        &resolver,
+        &transport,
+    );
+    assert!(result.ok);
+    assert_eq!(result.extraction_kind, super::ExtractionKind::Json);
+    assert_eq!(result.content_type.as_deref(), Some("application/json"));
+    assert!(result.content.contains("\"payload\": \""));
 }
 
 #[test]

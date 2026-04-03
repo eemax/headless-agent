@@ -13,6 +13,7 @@ use super::{
 };
 
 static SELECTORS: OnceLock<Result<Selectors, String>> = OnceLock::new();
+const MAX_SHELL_MARKER_SCAN_BYTES: usize = 64 * 1024;
 
 #[derive(Debug)]
 struct Selectors {
@@ -334,7 +335,12 @@ fn merge_schema_info(info: &mut SchemaInfo, value: &Value, depth: usize) {
                     .filter(|value| !value.is_empty());
             }
 
-            for key in ["@graph", "mainEntity", "mainEntityOfPage", "itemListElement"] {
+            for key in [
+                "@graph",
+                "mainEntity",
+                "mainEntityOfPage",
+                "itemListElement",
+            ] {
                 if let Some(child) = map.get(key) {
                     merge_schema_info(info, child, depth + 1);
                 }
@@ -437,7 +443,11 @@ fn extract_author_candidate(input: &str) -> Option<String> {
         .trim();
 
     for separator in ['·', '|', '—', '–'] {
-        candidate = candidate.split(separator).next().unwrap_or(candidate).trim();
+        candidate = candidate
+            .split(separator)
+            .next()
+            .unwrap_or(candidate)
+            .trim();
     }
 
     if let Some(prefix) = candidate.strip_suffix(',') {
@@ -528,7 +538,9 @@ fn is_github_issue_or_pr_url(url: &str) -> bool {
         return false;
     }
 
-    let segments = parsed.path_segments().map(|value| value.collect::<Vec<_>>());
+    let segments = parsed
+        .path_segments()
+        .map(|value| value.collect::<Vec<_>>());
     let Some(segments) = segments else {
         return false;
     };
@@ -1600,11 +1612,7 @@ fn is_noisy_element(element: &ElementRef<'_>) -> bool {
     }
 
     if let Some(value) = element.value().attr("style") {
-        let value = value.to_ascii_lowercase();
-        if value.contains("display:none")
-            || value.contains("visibility:hidden")
-            || value.contains("opacity:0")
-        {
+        if style_hides_element(value) {
             return true;
         }
     }
@@ -1615,11 +1623,7 @@ fn is_noisy_element(element: &ElementRef<'_>) -> bool {
 
     for attr in ["class", "id"] {
         if let Some(value) = element.value().attr(attr) {
-            let lower = value.to_ascii_lowercase();
-            if NOISY_TOKEN_SUBSTRINGS
-                .iter()
-                .any(|token| lower.contains(token))
-            {
+            if has_noisy_attribute_token(value) {
                 return true;
             }
         }
@@ -1643,6 +1647,45 @@ fn has_hidden_utility_class(element: &ElementRef<'_>) -> bool {
         .unwrap_or(false)
 }
 
+fn style_hides_element(style: &str) -> bool {
+    style.split(';').any(|declaration| {
+        let mut parts = declaration.splitn(2, ':');
+        let property = parts.next().unwrap_or("").trim().to_ascii_lowercase();
+        let value = parts
+            .next()
+            .unwrap_or("")
+            .chars()
+            .filter(|ch| !ch.is_ascii_whitespace())
+            .collect::<String>()
+            .to_ascii_lowercase();
+        matches!(
+            (property.as_str(), value.as_str()),
+            ("display", "none")
+                | ("display", "none!important")
+                | ("visibility", "hidden")
+                | ("visibility", "hidden!important")
+                | ("opacity", "0")
+                | ("opacity", "0!important")
+        )
+    })
+}
+
+fn has_noisy_attribute_token(value: &str) -> bool {
+    value
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .any(token_matches_noisy_pattern)
+}
+
+fn token_matches_noisy_pattern(token: &str) -> bool {
+    let lower = token.to_ascii_lowercase();
+    NOISY_TOKEN_SUBSTRINGS.iter().any(|pattern| {
+        lower == *pattern
+            || (lower.len() > pattern.len() && lower.starts_with(pattern))
+            || (lower.len() > pattern.len() && lower.ends_with(pattern))
+    })
+}
+
 fn is_low_signal_extraction(body_text: &str, visible_len: usize, raw_html_len: usize) -> bool {
     if body_text.trim().is_empty() || visible_len == 0 {
         return true;
@@ -1657,13 +1700,26 @@ fn is_low_signal_extraction(body_text: &str, visible_len: usize, raw_html_len: u
 }
 
 fn html_has_shell_markers(html: &str) -> bool {
-    let lower = html.to_ascii_lowercase();
-    lower.contains("__next")
-        || lower.contains("id=\"root\"")
-        || lower.contains("id='root'")
-        || lower.contains("id=\"app\"")
-        || lower.contains("id='app'")
-        || lower.contains("data-reactroot")
-        || lower.contains("__nuxt")
-        || lower.contains("ng-version")
+    let sample = &html.as_bytes()[..html.len().min(MAX_SHELL_MARKER_SCAN_BYTES)];
+    [
+        "__next",
+        "id=\"root\"",
+        "id='root'",
+        "id=\"app\"",
+        "id='app'",
+        "data-reactroot",
+        "__nuxt",
+        "ng-version",
+    ]
+    .iter()
+    .any(|marker| contains_ascii_case_insensitive(sample, marker.as_bytes()))
+}
+
+fn contains_ascii_case_insensitive(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    haystack
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle))
 }

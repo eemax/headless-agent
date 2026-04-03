@@ -3,6 +3,8 @@ use serde_json::Value;
 
 use super::{ExtractionKind, MAX_CONTENT_CHARS, Warning, html::extract_html};
 
+const MAX_JSON_SNIFF_BYTES: usize = 256 * 1024;
+
 #[derive(Debug)]
 pub(super) struct ExtractedContent {
     pub(super) kind: ExtractionKind,
@@ -198,9 +200,11 @@ fn detect_encoding(
     body: &[u8],
     sniff_html_meta: bool,
 ) -> &'static Encoding {
-    if let Some(label) = charset_from_content_type(content_type_header)
-        .or_else(|| sniff_html_meta.then(|| charset_from_html_meta(body)).flatten())
-    {
+    if let Some(label) = charset_from_content_type(content_type_header).or_else(|| {
+        sniff_html_meta
+            .then(|| charset_from_html_meta(body))
+            .flatten()
+    }) {
         if let Some(encoding) = Encoding::for_label(label.as_bytes()) {
             return encoding;
         }
@@ -215,16 +219,13 @@ fn detect_encoding(
 
 fn charset_from_content_type(header: Option<&str>) -> Option<String> {
     let header = header?;
-    let charset = header
-        .split(';')
-        .skip(1)
-        .find_map(|part| {
-            let mut pieces = part.trim().splitn(2, '=');
-            let key = pieces.next()?.trim();
-            let value = pieces.next()?.trim();
-            key.eq_ignore_ascii_case("charset")
-                .then_some(value.trim_matches(|ch| matches!(ch, '"' | '\'')))
-        })?;
+    let charset = header.split(';').skip(1).find_map(|part| {
+        let mut pieces = part.trim().splitn(2, '=');
+        let key = pieces.next()?.trim();
+        let value = pieces.next()?.trim();
+        key.eq_ignore_ascii_case("charset")
+            .then_some(value.trim_matches(|ch| matches!(ch, '"' | '\'')))
+    })?;
     (!charset.is_empty()).then_some(charset.to_ascii_lowercase())
 }
 
@@ -294,12 +295,23 @@ fn looks_like_json(body: &[u8]) -> bool {
     if !(trimmed.starts_with('{') || trimmed.starts_with('[')) {
         return false;
     }
+    if body.len() > MAX_JSON_SNIFF_BYTES {
+        return false;
+    }
     serde_json::from_slice::<Value>(body).is_ok()
 }
 
 fn looks_like_text(body: &[u8]) -> bool {
     if body.is_empty() {
         return true;
+    }
+    if body.contains(&0) {
+        return false;
+    }
+    if let Ok(text) = std::str::from_utf8(body) {
+        return text
+            .chars()
+            .all(|ch| !ch.is_control() || matches!(ch, '\t' | '\n' | '\r'));
     }
     let printable = body
         .iter()
