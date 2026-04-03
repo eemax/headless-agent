@@ -10,6 +10,8 @@ use crate::{
 
 mod content;
 mod html;
+mod render;
+mod sites;
 mod transport;
 
 #[cfg(test)]

@@ -896,6 +896,291 @@ fn github_pr_visible_body_fallback_extracts_body_author_and_published() {
 }
 
 #[test]
+fn github_clipboard_wrapper_does_not_hide_markdown_body() {
+    let result = html_output(
+        r#"
+        <html>
+          <body>
+            <main>
+              <div class="js-snippet-clipboard-copy-unpositioned DirectoryRichtextContent-module__SharedMarkdownContent__hHXUL">
+                <article class="markdown-body">
+                  <h1>Example README</h1>
+                  <p>This README should survive even when wrapped by clipboard-related classes.</p>
+                </article>
+              </div>
+            </main>
+          </body>
+        </html>
+        "#,
+    );
+
+    assert!(
+        result
+            .content
+            .contains("This README should survive even when wrapped by clipboard-related classes.")
+    );
+    assert!(!result.warnings.contains(&Warning::LowSignalExtraction));
+}
+
+#[test]
+fn github_repo_overview_extracts_entries_and_primary_readme() {
+    let result = html_output_at_url(
+        "https://github.com/example/repo",
+        r#"
+        <html>
+          <head>
+            <title>example/repo</title>
+          </head>
+          <body>
+            <script type="application/json" data-target="react-app.embeddedData">
+              {
+                "payload": {
+                  "codeViewRepoRoute": {
+                    "tree": {
+                      "items": [
+                        { "name": "src", "path": "src", "contentType": "directory" },
+                        { "name": "README.md", "path": "README.md", "contentType": "file" }
+                      ]
+                    },
+                    "overview": {
+                      "overviewFiles": [
+                        {
+                          "displayName": "README.md",
+                          "preferredFileType": "readme",
+                          "richText": "<article class=\"markdown-body\"><h1>repo readme</h1><p>Repository overview text from the embedded README.</p></article>"
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            </script>
+            <div id="repo-content-pjax-container"></div>
+          </body>
+        </html>
+        "#,
+    );
+
+    assert!(result.content.contains("## Top-level entries"));
+    assert!(result.content.contains("- src/"));
+    assert!(result.content.contains("- README.md"));
+    assert!(
+        result
+            .content
+            .contains("Repository overview text from the embedded README.")
+    );
+    assert!(!result.warnings.contains(&Warning::LowSignalExtraction));
+}
+
+#[test]
+fn github_tree_extracts_entries_and_directory_readme() {
+    let result = html_output_at_url(
+        "https://github.com/example/repo/tree/main/docs",
+        r#"
+        <html>
+          <body>
+            <script type="application/json" data-target="react-app.embeddedData">
+              {
+                "payload": {
+                  "codeViewTreeRoute": {
+                    "tree": {
+                      "items": [
+                        { "name": "guide.md", "path": "docs/guide.md", "contentType": "file" },
+                        { "name": "images", "path": "docs/images", "contentType": "directory" }
+                      ],
+                      "readme": {
+                        "richText": "<article class=\"markdown-body\"><p>Directory README content from the tree payload.</p></article>"
+                      }
+                    }
+                  }
+                }
+              }
+            </script>
+          </body>
+        </html>
+        "#,
+    );
+
+    assert!(result.content.contains("## Directory entries"));
+    assert!(result.content.contains("- guide.md"));
+    assert!(result.content.contains("- images/"));
+    assert!(
+        result
+            .content
+            .contains("Directory README content from the tree payload.")
+    );
+}
+
+#[test]
+fn github_blob_renders_embedded_markdown() {
+    let result = html_output_at_url(
+        "https://github.com/example/repo/blob/main/README.md",
+        r#"
+        <html>
+          <body>
+            <script type="application/json" data-target="react-app.embeddedData">
+              {
+                "payload": {
+                  "codeViewBlobRoute": {
+                    "richText": "<article class=\"markdown-body\"><h1>Blob Title</h1><p>Rendered markdown blob text.</p></article>"
+                  }
+                }
+              }
+            </script>
+          </body>
+        </html>
+        "#,
+    );
+
+    assert!(result.content.contains("Rendered markdown blob text."));
+    assert!(!result.content.contains("```"));
+}
+
+#[test]
+fn github_blob_falls_back_to_raw_lines_when_rich_text_is_missing() {
+    let result = html_output_at_url(
+        "https://github.com/example/repo/blob/main/src/main.rs",
+        r#"
+        <html>
+          <body>
+            <script type="application/json" data-target="react-app.embeddedData">
+              {
+                "payload": {
+                  "codeViewBlobLayoutRoute": {
+                    "blob": {
+                      "language": "Rust"
+                    }
+                  },
+                  "codeViewBlobLayoutRoute.StyledBlob": {
+                    "rawLines": [
+                      "fn main() {",
+                      "    println!(\"hi\");",
+                      "}"
+                    ]
+                  }
+                }
+              }
+            </script>
+          </body>
+        </html>
+        "#,
+    );
+
+    assert!(
+        result
+            .content
+            .contains("```rust\nfn main() {\n    println!(\"hi\");\n}\n```")
+    );
+}
+
+#[test]
+fn github_releases_page_uses_only_the_first_visible_release() {
+    let result = html_output_at_url(
+        "https://github.com/example/repo/releases",
+        r#"
+        <html>
+          <body>
+            <section aria-labelledby="release-1">
+              <h2 id="release-1">Release 1</h2>
+              <relative-time datetime="2026-03-01T00:00:00Z"></relative-time>
+              <a class="color-fg-muted wb-break-all" href="/octocat">octocat</a>
+              <span class="tmp-mr-3 f1 text-bold d-inline">
+                <a href="/example/repo/releases/tag/v1.2.3">Release v1.2.3</a>
+              </span>
+              <div data-test-selector="body-content" class="markdown-body">
+                <p>First release notes stay visible.</p>
+              </div>
+              <a href="/example/repo/releases/download/v1.2.3/app.tar.gz">app.tar.gz</a>
+            </section>
+            <section aria-labelledby="release-2">
+              <h2 id="release-2">Release 2</h2>
+              <relative-time datetime="2026-02-01T00:00:00Z"></relative-time>
+              <a class="color-fg-muted wb-break-all" href="/someone">someone</a>
+              <span class="tmp-mr-3 f1 text-bold d-inline">
+                <a href="/example/repo/releases/tag/v1.2.2">Release v1.2.2</a>
+              </span>
+              <div data-test-selector="body-content" class="markdown-body">
+                <p>Older release notes should not be included.</p>
+              </div>
+              <a href="/example/repo/releases/download/v1.2.2/old.tar.gz">old.tar.gz</a>
+            </section>
+          </body>
+        </html>
+        "#,
+    );
+
+    assert!(result.content.contains("Title: Release v1.2.3"));
+    assert!(result.content.contains("Author: octocat"));
+    assert!(result.content.contains("Published: 2026-03-01T00:00:00Z"));
+    assert!(result.content.contains("First release notes stay visible."));
+    assert!(result.content.contains("## Assets"));
+    assert!(result.content.contains("- app.tar.gz"));
+    assert!(
+        !result
+            .content
+            .contains("Older release notes should not be included.")
+    );
+    assert!(!result.content.contains("old.tar.gz"));
+}
+
+#[test]
+fn github_release_tag_page_extracts_visible_body_and_assets() {
+    let result = html_output_at_url(
+        "https://github.com/example/repo/releases/tag/v1.2.3",
+        r#"
+        <html>
+          <body>
+            <a href="/example/repo/releases/tag/v1.2.3">Release v1.2.3</a>
+            <div class="tmp-mb-3">
+              <a class="text-bold color-fg-muted" href="/apps/github-actions">github-actions</a>
+              <relative-time datetime="2026-02-03T04:05:06Z"></relative-time>
+            </div>
+            <div data-test-selector="body-content" class="markdown-body">
+              <p>Tagged release notes from the dedicated release page.</p>
+            </div>
+            <a href="/example/repo/releases/download/v1.2.3/app-macos.tar.gz">app-macos.tar.gz</a>
+            <a href="/example/repo/releases/download/v1.2.3/app-linux.tar.gz">app-linux.tar.gz</a>
+          </body>
+        </html>
+        "#,
+    );
+
+    assert!(result.content.contains("Title: Release v1.2.3"));
+    assert!(result.content.contains("Author: github-actions"));
+    assert!(result.content.contains("Published: 2026-02-03T04:05:06Z"));
+    assert!(
+        result
+            .content
+            .contains("Tagged release notes from the dedicated release page.")
+    );
+    assert!(result.content.contains("- app-macos.tar.gz"));
+    assert!(result.content.contains("- app-linux.tar.gz"));
+}
+
+#[test]
+fn unknown_github_surfaces_fall_back_to_generic_html_extraction() {
+    let result = html_output_at_url(
+        "https://github.com/example/repo/wiki",
+        r#"
+        <html>
+          <body>
+            <main>
+              <h1>Wiki Home</h1>
+              <p>Generic wiki content should still be extracted by the fallback path.</p>
+            </main>
+          </body>
+        </html>
+        "#,
+    );
+
+    assert!(
+        result
+            .content
+            .contains("Generic wiki content should still be extracted by the fallback path.")
+    );
+}
+
+#[test]
 fn json_sniffing_works_for_generic_content_type() {
     let resolver = FakeResolver::default().with_mapping("example.test", 80, vec![socket(80)]);
     let transport = FakeTransport::new(HashMap::from([(
