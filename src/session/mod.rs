@@ -1,5 +1,7 @@
 pub mod jsonl;
 
+#[cfg(test)]
+use std::path::Path;
 use std::{
     fs::{self, File, OpenOptions},
     io,
@@ -139,6 +141,19 @@ impl SessionStore {
         commit: SessionCommit,
         execution_guard: Option<&SessionExecutionGuard>,
     ) -> Result<SessionMeta, AppError> {
+        self.append_run_inner(session_id, commit, execution_guard, || Ok(()))
+    }
+
+    fn append_run_inner<F>(
+        &self,
+        session_id: &str,
+        commit: SessionCommit,
+        execution_guard: Option<&SessionExecutionGuard>,
+        after_execution_lock: F,
+    ) -> Result<SessionMeta, AppError>
+    where
+        F: FnOnce() -> Result<(), AppError>,
+    {
         let lock_path = self.session_dir(session_id).join("lock");
         let lock = OpenOptions::new()
             .read(true)
@@ -147,9 +162,15 @@ impl SessionStore {
             .truncate(false)
             .open(&lock_path)?;
         lock.lock_exclusive()?;
-        if execution_guard.is_none() {
-            self.fail_if_execution_locked(session_id)?;
-        }
+        // Read-only appends hold execution.lock through commit so a concurrent
+        // mutating run fails before side effects. This must remain try-lock
+        // based because append_run already holds the session lock here.
+        let _transient_guard = if execution_guard.is_none() {
+            Some(self.acquire_execution_lock(session_id, commit.expected_revision)?)
+        } else {
+            None
+        };
+        after_execution_lock()?;
         let mut meta = self.load_meta(session_id)?;
         if meta.revision != commit.expected_revision {
             lock.unlock()?;
@@ -220,22 +241,6 @@ impl SessionStore {
         Ok(())
     }
 
-    fn fail_if_execution_locked(&self, session_id: &str) -> Result<(), AppError> {
-        let file = self.open_execution_lock(session_id)?;
-        match file.try_lock_exclusive() {
-            Ok(()) => {
-                file.unlock()?;
-                Ok(())
-            }
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                Err(AppError::SessionConflict(format!(
-                    "session `{session_id}` already has a mutating run in progress"
-                )))
-            }
-            Err(error) => Err(error.into()),
-        }
-    }
-
     fn open_execution_lock(&self, session_id: &str) -> Result<File, AppError> {
         let path = self.session_dir(session_id).join("execution.lock");
         Ok(OpenOptions::new()
@@ -259,4 +264,106 @@ pub fn now_rfc3339() -> Result<String, AppError> {
 
 pub fn new_id() -> String {
     Ulid::new().to_string().to_lowercase()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        sync::{Arc, Barrier},
+        thread,
+    };
+
+    use tempfile::TempDir;
+
+    use super::*;
+    use crate::types::MessageRole;
+
+    #[test]
+    fn read_only_append_holds_execution_lock_while_commit_is_in_progress() {
+        let temp = TempDir::new().expect("tempdir");
+        let config = test_config(temp.path());
+        let store = SessionStore::new(&config);
+        store.ensure_root().expect("ensure sessions");
+        let session = store.create_session().expect("create session");
+        let session_id = session.session_id.clone();
+        let expected_revision = session.revision;
+
+        let record = test_record("run-1", "hello");
+        let commit = SessionCommit {
+            expected_revision,
+            char_count_delta: record.char_count(),
+            records: vec![record],
+            bind_agent_name: None,
+            bind_model: None,
+            bind_effort: None,
+            bind_cwd: None,
+            bind_initial_role: None,
+        };
+
+        let ready = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let store_clone = store.clone();
+        let thread_session_id = session_id.clone();
+        let ready_clone = Arc::clone(&ready);
+        let release_clone = Arc::clone(&release);
+        let handle = thread::spawn(move || {
+            store_clone.append_run_inner(&thread_session_id, commit, None, || {
+                ready_clone.wait();
+                release_clone.wait();
+                Ok(())
+            })
+        });
+
+        ready.wait();
+        let blocked = store.acquire_execution_lock(&session_id, expected_revision);
+        release.wait();
+
+        let err = blocked.expect_err("mutating run should be blocked during read-only append");
+        assert!(matches!(err, AppError::SessionConflict(_)));
+
+        let meta = handle
+            .join()
+            .expect("join append thread")
+            .expect("append succeeds");
+        assert_eq!(meta.revision, 1);
+        assert_eq!(meta.char_count, 5);
+
+        let messages = store.load_messages(&session_id).expect("load messages");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].content.as_deref(), Some("hello"));
+
+        let guard = store
+            .acquire_execution_lock(&session_id, meta.revision)
+            .expect("execution lock released after append");
+        drop(guard);
+    }
+
+    fn test_config(root: &Path) -> GlobalConfig {
+        GlobalConfig {
+            sessions_dir: root.join("sessions"),
+            shell: "/bin/bash".to_string(),
+            shell_args: vec!["-lc".to_string()],
+            max_stdin_bytes: 1024,
+            artifact_preview_bytes: 256,
+            catastrophic_output_bytes: 4096,
+            api_key: None,
+            api_key_env: None,
+            source_path: None,
+        }
+    }
+
+    fn test_record(run_id: &str, content: &str) -> TranscriptRecord {
+        TranscriptRecord {
+            v: 1,
+            ts: now_rfc3339().expect("timestamp"),
+            run_id: run_id.to_string(),
+            role: MessageRole::User,
+            content: Some(content.to_string()),
+            name: None,
+            tool_call_id: None,
+            preview: None,
+            artifact: None,
+            tool_calls: None,
+        }
+    }
 }
