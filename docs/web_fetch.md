@@ -793,10 +793,12 @@ Good candidates for new cases are pages that:
 - use layout tables or unusual DOM structures (the class of bug this benchmark was created to catch)
 - are representative of a site category we care about (docs, blogs, academic, link aggregators)
 - have stable content that won't rot the required markers quickly
+- live at version-pinned or otherwise durable URLs when possible
+- can be fetched reliably by automation; for some Q&A sites that may mean using a stable print-friendly view such as StackPrinter instead of the canonical page
 
 ### When to run
 
-Run after any change to root selection, table rendering, or the block collector in `render.rs` or `html.rs`. It is not part of CI — it hits live URLs, depends on defuddle being installed, and takes ~30 seconds. Treat it the same way you treat the live canaries: a manual check before merging extraction changes.
+Run after any change to root selection, table rendering, or the block collector in `render.rs` or `html.rs`. It is not part of CI — it hits live URLs, depends on defuddle being installed, and takes around a minute depending on network conditions. Treat it the same way you treat the live canaries: a manual check before merging extraction changes.
 
 ## Maintenance Notes
 

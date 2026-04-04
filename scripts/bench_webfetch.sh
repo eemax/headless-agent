@@ -50,13 +50,30 @@ fi
 #
 # Add new cases here as we encounter interesting pages.
 CASES=(
+  # Encyclopedias and essays
   "wikipedia_rust|https://en.wikipedia.org/wiki/Rust_(programming_language)|8000|Rust is a|## History"
   "paulgraham_greatwork|https://www.paulgraham.com/greatwork.html|20000|The first step is to decide what to work on|Notes"
+
+  # Link aggregators and feeds
   "hackernews_front|https://news.ycombinator.com|2000|points by|comments"
+  "hackernews_dropbox_thread|https://news.ycombinator.com/item?id=8863|20000|My YC app: Dropbox - Throw away your USB drive|I have a few qualms with this app:"
+
+  # Product and language docs
   "mdn_js_functions|https://developer.mozilla.org/en-US/docs/Web/JavaScript/Guide/Functions|4000|## Defining functions|function square"
   "github_docs_hello|https://docs.github.com/en/get-started/quickstart/hello-world|2000|## Step 1: Create a repository|pull request"
   "arxiv_2301_07041|https://arxiv.org/abs/2301.07041|1000|Fully Homomorphic Encryption|Abstract"
   "rust_book_install|https://doc.rust-lang.org/book/ch01-01-installation.html|1200|Rust is installed now|rustup"
+  "python_pep8|https://peps.python.org/pep-0008/|30000|Style Guide for Python Code|Readability counts"
+  "python_controlflow|https://docs.python.org/3.12/tutorial/controlflow.html|25000|# 4. More Control Flow Tools|Please enter an integer"
+  "git_rebase|https://git-scm.com/docs/git-rebase|30000|git-rebase - Reapply commits on top of another base tip|## SYNOPSIS"
+  "postgres_select|https://www.postgresql.org/docs/18/sql-select.html|35000|## SELECT|## Synopsis"
+
+  # Reference pages with unusual structure
+  "cppreference_precedence|https://en.cppreference.com/w/c/language/operator_precedence.html|4500|# C Operator Precedence|Operators are listed top to bottom"
+  "gnu_make_intro|https://www.gnu.org/software/make/manual/html_node/Introduction.html|1500|## 2 An Introduction to Makefiles|You need a file called a makefile"
+  "stackprinter_sorted_array|https://stackprinter.appspot.com/export?question=11227809&service=stackoverflow&language=en&width=700&hideAnswers=false&showAll=true|90000|Why is processing a sorted array faster than processing an unsorted array?|In this C++ code, sorting the data (before the timed region) makes the primary loop ~6x faster:"
+
+  # Minimal plain HTML
   "httpbin_html|https://httpbin.org/html|400|Herman Melville|Moby-Dick"
 )
 
