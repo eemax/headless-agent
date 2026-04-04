@@ -14,16 +14,16 @@ The implementation is intentionally direct:
 
 ## Runtime Flow
 
-The main entrypoint is [src/app.rs](/Users/ysera/headless-agent/src/app.rs).
+The main entrypoint is [src/app.rs](../src/app.rs).
 
 For a prompt run, the flow is:
 
-1. Parse CLI args in [src/cli.rs](/Users/ysera/headless-agent/src/cli.rs).
-2. Discover Headless roots and load global config in [src/config.rs](/Users/ysera/headless-agent/src/config.rs).
-3. Create or load the target session through [src/session/mod.rs](/Users/ysera/headless-agent/src/session/mod.rs).
-4. Resolve the effective agent and optional role via [src/agent_def.rs](/Users/ysera/headless-agent/src/agent_def.rs) and [src/role_def.rs](/Users/ysera/headless-agent/src/role_def.rs).
-5. Read stdin if present, load prior messages, and assemble provider messages in [src/prompt.rs](/Users/ysera/headless-agent/src/prompt.rs).
-6. Create a per-run directory under the session and execute the assistant/tool loop in [src/agent/loop.rs](/Users/ysera/headless-agent/src/agent/loop.rs).
+1. Parse CLI args in [src/cli.rs](../src/cli.rs).
+2. Discover Headless roots and load global config in [src/config.rs](../src/config.rs).
+3. Create or load the target session through [src/session/mod.rs](../src/session/mod.rs).
+4. Resolve the effective agent and optional role via [src/agent_def.rs](../src/agent_def.rs) and [src/role_def.rs](../src/role_def.rs).
+5. Read stdin if present, load prior messages, and assemble provider messages in [src/prompt.rs](../src/prompt.rs).
+6. Create a per-run directory under the session and execute the assistant/tool loop in [src/agent/loop.rs](../src/agent/loop.rs).
 7. If the run reaches a mutating tool, acquire the session execution lock before side effects and hold it through append.
 8. Re-acquire the session lock, verify the stored revision did not change, append JSONL records, and update `meta.json`.
 9. Print only the final assistant text to stdout.
@@ -32,29 +32,29 @@ Non-run commands such as `version`, `agent list`, `role list`, and `session show
 
 ## Module Map
 
-- [src/main.rs](/Users/ysera/headless-agent/src/main.rs)
+- [src/main.rs](../src/main.rs)
   Thin process wrapper that renders errors to stderr and exits through the centralized exit-code mapping.
-- [src/app.rs](/Users/ysera/headless-agent/src/app.rs)
+- [src/app.rs](../src/app.rs)
   High-level command execution and run orchestration.
-- [src/cli.rs](/Users/ysera/headless-agent/src/cli.rs)
+- [src/cli.rs](../src/cli.rs)
   CLI parsing with `lexopt`.
-- [src/error.rs](/Users/ysera/headless-agent/src/error.rs) and [src/exit.rs](/Users/ysera/headless-agent/src/exit.rs)
+- [src/error.rs](../src/error.rs) and [src/exit.rs](../src/exit.rs)
   Error categories and stable numeric exit codes.
-- [src/config.rs](/Users/ysera/headless-agent/src/config.rs)
+- [src/config.rs](../src/config.rs)
   Root discovery and `config.toml` loading.
-- [src/agent_def.rs](/Users/ysera/headless-agent/src/agent_def.rs) and [src/role_def.rs](/Users/ysera/headless-agent/src/role_def.rs)
+- [src/agent_def.rs](../src/agent_def.rs) and [src/role_def.rs](../src/role_def.rs)
   Agent and role TOML loading plus relative prompt-path resolution.
-- [src/prompt.rs](/Users/ysera/headless-agent/src/prompt.rs)
+- [src/prompt.rs](../src/prompt.rs)
   Prompt stack assembly and rough token estimation.
-- [src/provider/openrouter.rs](/Users/ysera/headless-agent/src/provider/openrouter.rs)
+- [src/provider/openrouter.rs](../src/provider/openrouter.rs)
   Direct OpenRouter chat-completions client.
-- [src/session/mod.rs](/Users/ysera/headless-agent/src/session/mod.rs) and [src/session/jsonl.rs](/Users/ysera/headless-agent/src/session/jsonl.rs)
+- [src/session/mod.rs](../src/session/mod.rs) and [src/session/jsonl.rs](../src/session/jsonl.rs)
   Session creation, metadata persistence, JSONL append/read helpers, and optimistic concurrency.
-- [src/tools](/Users/ysera/headless-agent/src/tools)
+- [src/tools](../src/tools)
   Built-in tool specs, dispatch, and implementations.
-- [src/artifact.rs](/Users/ysera/headless-agent/src/artifact.rs)
+- [src/artifact.rs](../src/artifact.rs)
   Artifact and preview handling for large outputs.
-- [src/types](/Users/ysera/headless-agent/src/types)
+- [src/types](../src/types)
   Shared types for messages, session metadata, and run results.
 
 ## Session Model
@@ -89,7 +89,7 @@ Important behavior:
 
 ## Session History Projection
 
-Not all records from a run are persisted back to the session's `messages.jsonl`. The projection in [src/app.rs](/Users/ysera/headless-agent/src/app.rs) works as follows:
+Not all records from a run are persisted back to the session's `messages.jsonl`. The projection in [src/app.rs](../src/app.rs) works as follows:
 
 - the user prompt(s) are always appended
 - if the run completed normally, the final assistant message (the one without tool calls) is appended
@@ -136,9 +136,9 @@ First-pass limitations:
 
 ## Provider And Tool Loop
 
-The provider loop in [src/agent/loop.rs](/Users/ysera/headless-agent/src/agent/loop.rs) uses:
+The provider loop in [src/agent/loop.rs](../src/agent/loop.rs) uses:
 - OpenRouter only
-- a hard step cap of `24`
+- no hard step cap; runs are bounded only by the total run timeout and interrupt signals
 - a per-tool retry cap of `2` for read-only tools only
 - `parallel_tool_calls = false`
 - a total run deadline derived from the agent timeout

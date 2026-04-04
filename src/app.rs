@@ -414,7 +414,6 @@ fn project_session_history(
 fn termination_kind(termination: &LoopTermination) -> &'static str {
     match termination {
         LoopTermination::Complete => "complete",
-        LoopTermination::StepCapExceeded => "step_cap_exceeded",
         LoopTermination::Timeout(_) => "timeout",
         LoopTermination::Error(_) => "error",
     }
@@ -422,7 +421,7 @@ fn termination_kind(termination: &LoopTermination) -> &'static str {
 
 fn termination_message(termination: &LoopTermination) -> Option<&str> {
     match termination {
-        LoopTermination::Complete | LoopTermination::StepCapExceeded => None,
+        LoopTermination::Complete => None,
         LoopTermination::Timeout(message) | LoopTermination::Error(message) => Some(message),
     }
 }

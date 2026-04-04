@@ -34,7 +34,6 @@ pub struct AgentRunContext {
     pub interrupted: Arc<AtomicBool>,
 }
 
-const STEP_CAP: usize = 24;
 const TOOL_RETRY_CAP: usize = 2;
 
 pub fn run_agent_loop(context: AgentRunContext) -> Result<RunOutcome, AppError> {
@@ -70,7 +69,8 @@ pub fn run_agent_loop(context: AgentRunContext) -> Result<RunOutcome, AppError> 
     let mut total_prompt_tokens: usize = 0;
     let mut total_completion_tokens: usize = 0;
 
-    for _step in 0..STEP_CAP {
+    let mut step: usize = 0;
+    loop {
         let request_timeout = match run_control.remaining_budget() {
             Ok(timeout) => timeout,
             Err(err) => {
@@ -132,7 +132,7 @@ pub fn run_agent_loop(context: AgentRunContext) -> Result<RunOutcome, AppError> 
         }
 
         let (assistant_content, assistant_artifact) =
-            assistant_content_to_record(&context, _step, response.content.as_deref())?;
+            assistant_content_to_record(&context, step, response.content.as_deref())?;
         if let Some(ref artifact) = assistant_artifact {
             artifacts.paths.push(artifact.clone());
         }
@@ -224,16 +224,8 @@ pub fn run_agent_loop(context: AgentRunContext) -> Result<RunOutcome, AppError> 
                 tool_calls: Vec::new(),
             });
         }
+        step += 1;
     }
-
-    Ok(partial_outcome(
-        records,
-        artifacts,
-        LoopTermination::StepCapExceeded,
-        run_control,
-        total_prompt_tokens,
-        total_completion_tokens,
-    ))
 }
 
 fn partial_outcome(

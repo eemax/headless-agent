@@ -6,9 +6,9 @@ This repo is designed so a fresh engineer or agent can make progress by reading 
 
 Read these in order before making structural changes:
 
-1. [README.md](/Users/ysera/headless-agent/README.md)
-2. [docs/architecture.md](/Users/ysera/headless-agent/docs/architecture.md)
-3. [src/app.rs](/Users/ysera/headless-agent/src/app.rs)
+1. [README.md](../README.md)
+2. [docs/architecture.md](./architecture.md)
+3. [src/app.rs](../src/app.rs)
 4. the module you plan to change
 
 If you are changing behavior, update docs alongside code whenever the user-facing contract changes.
@@ -57,14 +57,14 @@ Plan mode
 
 Typical file ownership by concern:
 
-- CLI surface: [src/cli.rs](/Users/ysera/headless-agent/src/cli.rs)
-- command orchestration: [src/app.rs](/Users/ysera/headless-agent/src/app.rs)
-- config and root lookup: [src/config.rs](/Users/ysera/headless-agent/src/config.rs)
-- agent and role loading: [src/agent_def.rs](/Users/ysera/headless-agent/src/agent_def.rs), [src/role_def.rs](/Users/ysera/headless-agent/src/role_def.rs)
-- prompt assembly: [src/prompt.rs](/Users/ysera/headless-agent/src/prompt.rs)
-- provider integration: [src/provider/openrouter.rs](/Users/ysera/headless-agent/src/provider/openrouter.rs)
-- session persistence: [src/session/mod.rs](/Users/ysera/headless-agent/src/session/mod.rs)
-- tool harness: [src/tools/mod.rs](/Users/ysera/headless-agent/src/tools/mod.rs) plus the per-tool files
+- CLI surface: [src/cli.rs](../src/cli.rs)
+- command orchestration: [src/app.rs](../src/app.rs)
+- config and root lookup: [src/config.rs](../src/config.rs)
+- agent and role loading: [src/agent_def.rs](../src/agent_def.rs), [src/role_def.rs](../src/role_def.rs)
+- prompt assembly: [src/prompt.rs](../src/prompt.rs)
+- provider integration: [src/provider/openrouter.rs](../src/provider/openrouter.rs)
+- session persistence: [src/session/mod.rs](../src/session/mod.rs)
+- tool harness: [src/tools/mod.rs](../src/tools/mod.rs) plus the per-tool files
 
 Prefer small, local changes over broad refactors. If a change only touches one phase of the runtime flow, keep the patch in that phase.
 
@@ -97,7 +97,7 @@ cargo test --test version
 ```
 
 The provider test strategy is intentional:
-- offline request-shaping tests use the fake local HTTP server in [tests/common.rs](/Users/ysera/headless-agent/tests/common.rs)
+- offline request-shaping tests use the fake local HTTP server in [tests/common.rs](../tests/common.rs)
 - the live smoke test is ignored by default and should stay opt-in
 
 Do not turn regular CI-style coverage into live network dependence.
@@ -124,13 +124,13 @@ Useful filters:
 ## When Adding Features
 
 If you add a new CLI flag or command:
-- update [src/cli.rs](/Users/ysera/headless-agent/src/cli.rs)
+- update [src/cli.rs](../src/cli.rs)
 - update the README
 - add or update CLI tests
 
 If you add a new tool:
-- add its spec and dispatcher branch in [src/tools/mod.rs](/Users/ysera/headless-agent/src/tools/mod.rs)
-- add an implementation file under [src/tools](/Users/ysera/headless-agent/src/tools)
+- add its spec and dispatcher branch in [src/tools/mod.rs](../src/tools/mod.rs)
+- add an implementation file under [src/tools](../src/tools)
 - decide the plan-mode payload
 - add allowlist and end-to-end coverage
 
@@ -158,7 +158,7 @@ Do not paper over those gaps with hidden fallback behavior. It is better to fail
 
 ## Benchmarks And Manual Checks
 
-There is a lightweight benchmark helper at [scripts/bench.sh](/Users/ysera/headless-agent/scripts/bench.sh).
+There is a lightweight benchmark helper at [scripts/bench.sh](../scripts/bench.sh).
 
 Use it for quick operational smoke checks, not as a substitute for targeted tests.
 
@@ -172,6 +172,6 @@ cargo run -- --session new --agent coder "say hello"
 ## Docs To Keep In Sync
 
 When user-facing behavior changes, update:
-- [README.md](/Users/ysera/headless-agent/README.md)
-- [docs/architecture.md](/Users/ysera/headless-agent/docs/architecture.md)
-- [docs/headless.md](/Users/ysera/headless-agent/docs/headless.md)
+- [README.md](../README.md)
+- [docs/architecture.md](./architecture.md)
+- [docs/headless.md](./headless.md)

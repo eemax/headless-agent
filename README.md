@@ -85,7 +85,7 @@ For faster local iteration, you can symlink a release build instead of reinstall
 ```bash
 cargo build --release
 mkdir -p ~/.local/bin
-ln -sf /Users/ysera/headless-agent/target/release/headless ~/.local/bin/headless
+ln -sf $(pwd)/target/release/headless ~/.local/bin/headless
 ```
 
 With that setup, code changes only require:
@@ -111,9 +111,9 @@ For tests and local harnessing, the implementation also supports `HEADLESS_REPO_
 
 ## Docs
 
-- [Architecture](/Users/ysera/headless-agent/docs/architecture.md)
-- [Configuration reference](/Users/ysera/headless-agent/docs/headless.md)
-- [Developer playbook](/Users/ysera/headless-agent/docs/dev.md)
+- [Architecture](docs/architecture.md)
+- [Configuration reference](docs/headless.md)
+- [Developer playbook](docs/dev.md)
 - [Web fetch deep dive](docs/web_fetch.md)
 
 ## Repo Layout

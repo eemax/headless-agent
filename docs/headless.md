@@ -28,7 +28,7 @@ Supported locations:
 - `<repo-root>/config.toml`
 - `~/.headless-agent/config.toml`
 
-Current default values come from [src/config.rs](/Users/ysera/headless-agent/src/config.rs).
+Current default values come from [src/config.rs](../src/config.rs).
 
 ### Full Example
 
@@ -113,7 +113,7 @@ base_url = "https://openrouter.ai/api/v1"
 api_key = ""
 api_key_env = "OPENROUTER_API_KEY"
 
-default_model = "openai/gpt-4.1"
+default_model = "minimax/minimax-m2.7"
 default_effort = "medium"
 max_output_tokens = 12000
 compaction_at_tokens = 180000
@@ -129,12 +129,13 @@ enabled_tools = [
   "grep",
   "apply_patch",
   "bash",
+  "web_search",
   "web_fetch",
 ]
 
 system_prompt_file = "../prompts/coder.md"
 
-timeout = "2h"
+timeout = "1h"
 ```
 
 ### Required Fields
@@ -221,6 +222,7 @@ Recognized built-in tools in the first pass:
 - `grep`
 - `apply_patch`
 - `bash`
+- `web_search`
 - `web_fetch`
 
 Unknown tool names are ignored when building provider tool definitions, but a model cannot successfully call them because the dispatcher only knows the built-ins above.

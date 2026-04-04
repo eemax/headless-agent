@@ -19,7 +19,6 @@ pub struct ToolExecution {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoopTermination {
     Complete,
-    StepCapExceeded,
     Timeout(String),
     Error(String),
 }
@@ -28,9 +27,6 @@ impl LoopTermination {
     pub fn into_error(self) -> Option<AppError> {
         match self {
             Self::Complete => None,
-            Self::StepCapExceeded => Some(AppError::Runtime(
-                "agent loop exceeded the step cap".to_string(),
-            )),
             Self::Timeout(msg) => Some(AppError::Timeout(msg)),
             Self::Error(msg) => Some(AppError::Runtime(msg)),
         }

@@ -5,7 +5,7 @@ base_url = "https://openrouter.ai/api/v1"
 api_key = ""
 api_key_env = "OPENROUTER_API_KEY"
 
-default_model = "openai/gpt-4.1"
+default_model = "minimax/minimax-m2.7"
 default_effort = "medium"
 max_output_tokens = 12000
 compaction_at_tokens = 180000
@@ -27,4 +27,4 @@ enabled_tools = [
 
 system_prompt_file = "../prompts/coder.md"
 
-timeout = "2h"
+timeout = "1h"
