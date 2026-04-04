@@ -39,7 +39,7 @@ cargo run -- agent list
 cargo run -- role list
 ```
 
-`websearch` requires `EXA_API_KEY`.
+`websearch` requires `EXA_API_KEY` and currently exposes the simplified Exa search modes `auto`, `neural`, and `deep`.
 
 Create a session:
 

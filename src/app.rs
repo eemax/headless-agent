@@ -185,10 +185,15 @@ fn run_prompt(
     };
 
     let agent = LoadedAgent::load(&roots, &agent_name)?;
-    let role_name = args
-        .role
-        .clone()
-        .or_else(|| session_meta.initial_role.clone());
+    if let Some(role_name) = args.role.as_deref()
+        && let Some(bound_role) = session_meta.initial_role.as_deref()
+    {
+        return Err(AppError::Session(format!(
+            "session `{session_id}` already has role `{bound_role}`; roles can only be selected once per session, so `--role {role_name}` is not allowed"
+        )));
+    }
+    let role_invoked_this_run = args.role.is_some() && session_meta.initial_role.is_none();
+    let role_name = args.role.clone().or_else(|| session_meta.initial_role.clone());
     let role = role_name
         .as_ref()
         .map(|name| LoadedRole::load(&roots, name))
@@ -215,6 +220,7 @@ fn run_prompt(
     let prompt = assemble_prompt(
         &agent,
         role.as_ref(),
+        role_invoked_this_run,
         &history,
         &args.prompt,
         stdin.as_deref(),
@@ -228,7 +234,7 @@ fn run_prompt(
 
     let session_dir = store.session_dir(&session_id);
     let run_id = new_id();
-    let user_records = build_user_records(&run_id, &args.prompt, stdin.as_deref())?;
+    let user_records = build_user_records(&run_id, &prompt.current_user_prompt, stdin.as_deref())?;
     let run_dir = create_run_dir(&session_dir, &run_id)?;
     let run_context = AgentRunContext {
         session_id: session_id.clone(),

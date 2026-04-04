@@ -184,9 +184,17 @@ impl SessionStore {
         )?;
         if meta.agent_name.is_none() {
             meta.agent_name = commit.bind_agent_name;
+        }
+        if meta.model.is_none() {
             meta.model = commit.bind_model;
+        }
+        if meta.effort.is_none() {
             meta.effort = commit.bind_effort;
+        }
+        if meta.cwd.is_none() {
             meta.cwd = commit.bind_cwd;
+        }
+        if meta.initial_role.is_none() {
             meta.initial_role = commit.bind_initial_role;
         }
         meta.updated_at = now_rfc3339()?;

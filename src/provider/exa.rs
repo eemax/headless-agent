@@ -5,12 +5,13 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use crate::error::AppError;
 
 const DEFAULT_BASE_URL: &str = "https://api.exa.ai";
-const CONNECT_TIMEOUT_CAP: Duration = Duration::from_secs(3);
+const CONNECT_TIMEOUT_CAP: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone)]
 pub struct ExaClient {
     base_url: String,
     api_key: String,
+    agent: ureq::Agent,
 }
 
 impl ExaClient {
@@ -19,7 +20,11 @@ impl ExaClient {
     }
 
     pub fn with_base_url(base_url: String, api_key: String) -> Self {
-        Self { base_url, api_key }
+        Self {
+            base_url,
+            api_key,
+            agent: build_agent(),
+        }
     }
 
     pub fn from_env() -> Result<Self, AppError> {
@@ -55,17 +60,12 @@ impl ExaClient {
         Resp: DeserializeOwned,
     {
         let url = format!("{}{}", self.base_url.trim_end_matches('/'), path);
-        let connect_timeout = CONNECT_TIMEOUT_CAP.min(timeout);
-        let agent = ureq::AgentBuilder::new()
-            .timeout_connect(connect_timeout)
-            .timeout(timeout)
-            .timeout_read(timeout)
-            .timeout_write(timeout)
-            .build();
-
-        let response = agent
+        let response = self
+            .agent
             .post(&url)
+            .timeout(timeout)
             .set("x-api-key", &self.api_key)
+            .set("Accept", "application/json")
             .set("Content-Type", "application/json")
             .send_json(request);
 
@@ -89,6 +89,12 @@ impl ExaClient {
             AppError::Tool(format!("failed to decode exa {path} response: {error}"))
         })
     }
+}
+
+fn build_agent() -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout_connect(CONNECT_TIMEOUT_CAP)
+        .build()
 }
 
 fn render_body(body: &str) -> String {
@@ -128,6 +134,8 @@ pub struct HighlightsSpec {}
 pub struct SearchResponse {
     #[serde(default)]
     pub results: Vec<SearchResult>,
+    #[serde(rename = "searchType")]
+    pub search_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -146,92 +154,18 @@ pub struct SearchResult {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        io::{Read, Write},
-        net::{SocketAddr, TcpListener},
-        sync::{Arc, Mutex},
-        thread,
-        time::Duration,
-    };
-
-    use serde_json::Value;
+    use std::time::Duration;
 
     use super::{ExaClient, HighlightsSpec, SearchContentsSpec, SearchRequest};
     use crate::error::AppError;
-
-    fn spawn_http_server(
-        response_status: &str,
-        response_body: &str,
-    ) -> (SocketAddr, Arc<Mutex<String>>, thread::JoinHandle<()>) {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind test listener");
-        let address = listener.local_addr().expect("listener addr");
-        let request = Arc::new(Mutex::new(String::new()));
-        let captured_request = Arc::clone(&request);
-        let status = response_status.to_string();
-        let body = response_body.to_string();
-        let handle = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept request");
-            let mut request_bytes = Vec::new();
-            let mut buffer = [0u8; 1024];
-            loop {
-                let bytes_read = stream.read(&mut buffer).expect("read request");
-                if bytes_read == 0 {
-                    break;
-                }
-                request_bytes.extend_from_slice(&buffer[..bytes_read]);
-                if request_complete(&request_bytes) {
-                    break;
-                }
-            }
-            *captured_request.lock().expect("capture request") =
-                String::from_utf8_lossy(&request_bytes).into_owned();
-            let response = format!(
-                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            stream
-                .write_all(response.as_bytes())
-                .expect("write response");
-        });
-        (address, request, handle)
-    }
-
-    fn request_complete(bytes: &[u8]) -> bool {
-        let Some(header_end) = find_bytes(bytes, b"\r\n\r\n") else {
-            return false;
-        };
-        let headers = String::from_utf8_lossy(&bytes[..header_end]);
-        let content_length = headers
-            .lines()
-            .find_map(|line| {
-                let (name, value) = line.split_once(':')?;
-                if !name.eq_ignore_ascii_case("content-length") {
-                    return None;
-                }
-                value.trim().parse::<usize>().ok()
-            })
-            .unwrap_or(0);
-        bytes.len() >= header_end + 4 + content_length
-    }
-
-    fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-        haystack
-            .windows(needle.len())
-            .position(|window| window == needle)
-    }
-
-    fn request_json(raw_request: &str) -> Value {
-        let body = raw_request
-            .split_once("\r\n\r\n")
-            .map(|(_, body)| body)
-            .expect("request body");
-        serde_json::from_str(body).expect("request json")
-    }
+    use crate::test_support::{request_json, spawn_json_http_server};
 
     #[test]
     fn search_request_sends_num_results_and_start_published_date() {
-        let (address, request, handle) = spawn_http_server("200 OK", r#"{"results":[]}"#);
+        let (address, request, handle) = spawn_json_http_server(
+            "200 OK",
+            r#"{"results":[],"searchType":"auto"}"#,
+        );
         let client = ExaClient::with_base_url(format!("http://{address}"), "test-key".to_string());
         let search = SearchRequest {
             query: "rust async runtimes".to_string(),
@@ -258,6 +192,11 @@ mod tests {
                 .to_ascii_lowercase()
                 .contains("x-api-key: test-key")
         );
+        assert!(
+            raw_request
+                .to_ascii_lowercase()
+                .contains("accept: application/json")
+        );
 
         let request_json = request_json(&raw_request);
         assert_eq!(request_json["query"], "rust async runtimes");
@@ -269,7 +208,7 @@ mod tests {
     #[test]
     fn non_2xx_responses_surface_as_tool_errors() {
         let (address, _request, handle) =
-            spawn_http_server("401 Unauthorized", r#"{"error":"bad key"}"#);
+            spawn_json_http_server("401 Unauthorized", r#"{"error":"bad key"}"#);
         let client = ExaClient::with_base_url(format!("http://{address}"), "test-key".to_string());
         let search = SearchRequest {
             query: "rust".to_string(),

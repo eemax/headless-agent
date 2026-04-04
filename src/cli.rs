@@ -2,7 +2,11 @@ use std::{env, ffi::OsString, path::PathBuf};
 
 use lexopt::Parser;
 
-use crate::{error::AppError, types::Effort};
+use crate::{
+    error::AppError,
+    tools::web_search,
+    types::Effort,
+};
 
 const USAGE: &str = "usage:
   headless version
@@ -119,14 +123,24 @@ fn parse_websearch(args: &[OsString]) -> Result<Command, AppError> {
     while let Some(arg) = parser.next()? {
         match arg {
             lexopt::Arg::Long("type") => {
-                search_type = Some(parser.value()?.to_string_lossy().to_string());
+                let raw = parser.value()?.to_string_lossy().to_string();
+                let validated = web_search::validate_search_type(Some(&raw)).map_err(|_| {
+                    AppError::Usage(format!(
+                        "invalid `--type` value `{raw}`; expected one of auto|neural|deep\n\n{USAGE}"
+                    ))
+                })?;
+                search_type = Some(validated);
             }
             lexopt::Arg::Long("num_results") => {
                 let raw = parser.value()?.to_string_lossy().to_string();
                 let parsed = raw.parse::<usize>().map_err(|_| {
                     AppError::Usage(format!("invalid `--num_results` value `{raw}`\n\n{USAGE}"))
                 })?;
-                num_results = Some(parsed);
+                let validated =
+                    web_search::validate_num_results(Some(parsed as u64)).map_err(|error| {
+                        AppError::Usage(format!("{error}\n\n{USAGE}"))
+                    })?;
+                num_results = Some(validated);
             }
             lexopt::Arg::Long("published_within_days") => {
                 let raw = parser.value()?.to_string_lossy().to_string();
@@ -135,7 +149,9 @@ fn parse_websearch(args: &[OsString]) -> Result<Command, AppError> {
                         "invalid `--published_within_days` value `{raw}`\n\n{USAGE}"
                     ))
                 })?;
-                published_within_days = Some(parsed);
+                let validated = web_search::validate_published_within_days(Some(parsed as u64))
+                    .map_err(|error| AppError::Usage(format!("{error}\n\n{USAGE}")))?;
+                published_within_days = validated;
             }
             lexopt::Arg::Long("include_domains") => {
                 include_domains.push(parser.value()?.to_string_lossy().to_string());
@@ -290,6 +306,8 @@ fn parse_run_args(args: Vec<OsString>) -> Result<Command, AppError> {
 
 #[cfg(test)]
 mod tests {
+    use crate::error::AppError;
+
     use super::{Command, parse_from_args};
 
     #[test]
@@ -331,6 +349,35 @@ mod tests {
                 assert_eq!(exclude_domains, vec!["example.com"]);
             }
             other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn websearch_rejects_missing_query() {
+        let error = parse_from_args(["websearch"]).expect_err("missing query");
+        match error {
+            AppError::Usage(message) => assert!(message.contains("missing search query")),
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
+    fn websearch_rejects_invalid_type() {
+        let error = parse_from_args(["websearch", "--type", "keyword", "rust"])
+            .expect_err("invalid type");
+        match error {
+            AppError::Usage(message) => assert!(message.contains("invalid `--type` value")),
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
+    fn websearch_rejects_invalid_num_results() {
+        let error = parse_from_args(["websearch", "--num_results", "0", "rust"])
+            .expect_err("invalid num_results");
+        match error {
+            AppError::Usage(message) => assert!(message.contains("tool argument `num_results`")),
+            other => panic!("unexpected error: {other}"),
         }
     }
 }

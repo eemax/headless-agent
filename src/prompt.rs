@@ -9,46 +9,27 @@ use crate::{
 pub struct PromptAssembly {
     pub messages: Vec<PromptMessage>,
     pub estimated_tokens: usize,
+    pub current_user_prompt: String,
 }
 
 pub fn assemble_prompt(
     agent: &LoadedAgent,
     role: Option<&LoadedRole>,
+    apply_role_user_prefix: bool,
     history: &[TranscriptRecord],
     user_prompt: &str,
     stdin: Option<&str>,
 ) -> Result<PromptAssembly, AppError> {
     let mut messages = Vec::new();
+    let system_prompt = build_system_prompt(agent, role);
 
     messages.push(PromptMessage {
         role: MessageRole::System,
-        content: Some(agent.system_prompt.clone()),
+        content: Some(system_prompt),
         name: None,
         tool_call_id: None,
         tool_calls: Vec::new(),
     });
-
-    if let Some(addendum) = browsing_policy_addendum(&agent.def.enabled_tools) {
-        messages.push(PromptMessage {
-            role: MessageRole::System,
-            content: Some(addendum.to_string()),
-            name: None,
-            tool_call_id: None,
-            tool_calls: Vec::new(),
-        });
-    }
-
-    if let Some(role) = role
-        && let Some(system_prompt) = &role.system_prompt
-    {
-        messages.push(PromptMessage {
-            role: MessageRole::System,
-            content: Some(system_prompt.clone()),
-            name: None,
-            tool_call_id: None,
-            tool_calls: Vec::new(),
-        });
-    }
 
     // Session history is replay-oriented rather than audit-oriented:
     // only persisted user prompts and completed assistant replies are sent back.
@@ -76,20 +57,11 @@ pub fn assemble_prompt(
         }
     }
 
-    let mut current_prompt = String::new();
-    if let Some(role) = role
-        && let Some(prefix) = &role.user_prefix
-    {
-        current_prompt.push_str(prefix);
-        if !prefix.ends_with('\n') {
-            current_prompt.push('\n');
-        }
-    }
-    current_prompt.push_str(user_prompt);
+    let current_prompt = build_current_user_prompt(role, apply_role_user_prefix, user_prompt);
 
     messages.push(PromptMessage {
         role: MessageRole::User,
-        content: Some(current_prompt),
+        content: Some(current_prompt.clone()),
         name: None,
         tool_call_id: None,
         tool_calls: Vec::new(),
@@ -109,24 +81,43 @@ pub fn assemble_prompt(
     Ok(PromptAssembly {
         messages,
         estimated_tokens,
+        current_user_prompt: current_prompt,
     })
 }
 
-fn browsing_policy_addendum(enabled_tools: &[String]) -> Option<&'static str> {
-    let has_search = enabled_tools.iter().any(|tool| tool == "web_search");
-    let has_fetch = enabled_tools.iter().any(|tool| tool == "web_fetch");
-    match (has_search, has_fetch) {
-        (true, true) => Some(
-            "Browsing policy:\n- Use web_search first to discover sources.\n- Use web_fetch for live verification or deeper reading when search snippets are not sufficient.\n- Prefer 1-3 sources unless broader coverage is clearly necessary.\n- Cite the exact URLs you used in the final answer.\n\nFreshness policy:\n- Use published_within_days when the task depends on recently published information.\n- Leave published_within_days unset for evergreen topics unless the user asks for recent coverage.\n\nEfficiency policy:\n- Avoid repeated searches with nearly identical queries.\n- Avoid fetching many live pages when search results already provide enough evidence.",
-        ),
-        (true, false) => Some(
-            "Browsing policy:\n- Use web_search to discover relevant sources.\n- Prefer 1-3 sources unless broader coverage is clearly necessary.\n- Cite the exact URLs you used in the final answer.\n\nFreshness policy:\n- Use published_within_days when the task depends on recently published information.\n- Leave published_within_days unset for evergreen topics unless the user asks for recent coverage.\n\nEfficiency policy:\n- Avoid repeated searches with nearly identical queries.",
-        ),
-        (false, true) => Some(
-            "Browsing policy:\n- Use web_fetch to read specific live pages when you need current or external information.\n- Fetch only the pages you need.\n- Cite the exact URLs you used in the final answer.\n\nEfficiency policy:\n- Avoid fetching many live pages when one or two targeted reads are sufficient.",
-        ),
-        (false, false) => None,
+fn build_system_prompt(agent: &LoadedAgent, role: Option<&LoadedRole>) -> String {
+    let mut parts = Vec::new();
+    let base = agent.system_prompt.trim();
+    if !base.is_empty() {
+        parts.push(base);
     }
+    if let Some(system_prompt) = role.and_then(|value| value.system_prompt.as_deref()) {
+        let trimmed = system_prompt.trim();
+        if !trimmed.is_empty() {
+            parts.push(trimmed);
+        }
+    }
+    parts.join("\n\n")
+}
+
+fn build_current_user_prompt(
+    role: Option<&LoadedRole>,
+    apply_role_user_prefix: bool,
+    user_prompt: &str,
+) -> String {
+    let mut current_prompt = String::new();
+    if apply_role_user_prefix
+        && let Some(prefix) = role
+            .and_then(|value| value.user_prefix.as_deref())
+            .filter(|value| !value.trim().is_empty())
+    {
+        current_prompt.push_str(prefix);
+        if !prefix.ends_with('\n') {
+            current_prompt.push('\n');
+        }
+    }
+    current_prompt.push_str(user_prompt);
+    current_prompt
 }
 
 /// Pre-flight rough estimate based on character count (chars / 4).
@@ -147,6 +138,7 @@ mod tests {
     use super::assemble_prompt;
     use crate::{
         agent_def::{AgentDef, LoadedAgent},
+        role_def::{LoadedRole, RoleDef},
         types::Effort,
     };
 
@@ -173,88 +165,71 @@ mod tests {
         }
     }
 
-    fn system_messages(prompt: &super::PromptAssembly) -> Vec<&str> {
-        prompt
-            .messages
-            .iter()
-            .filter_map(|message| message.content.as_deref())
-            .collect::<Vec<_>>()
+    fn loaded_role(system_prompt: Option<&str>, user_prefix: Option<&str>) -> LoadedRole {
+        LoadedRole {
+            def: RoleDef {
+                name: "auditor".to_string(),
+                description: None,
+                system_prompt_file: None,
+                user_prefix_file: None,
+            },
+            path: PathBuf::new(),
+            system_prompt: system_prompt.map(ToOwned::to_owned),
+            user_prefix: user_prefix.map(ToOwned::to_owned),
+        }
     }
 
     #[test]
-    fn assemble_prompt_includes_joint_browsing_policy_when_both_tools_are_enabled() {
+    fn assemble_prompt_combines_agent_and_role_into_one_system_message() {
         let prompt = assemble_prompt(
             &loaded_agent(vec!["web_search".to_string(), "web_fetch".to_string()]),
-            None,
+            Some(&loaded_role(Some("auditor system"), Some("role user prefix"))),
+            true,
             &[],
             "find docs",
             None,
         )
         .expect("prompt assembly");
 
-        let system_messages = system_messages(&prompt);
-        assert!(
-            system_messages
-                .iter()
-                .any(|message| message.contains("Use web_search first"))
+        assert_eq!(prompt.messages.len(), 2);
+        assert_eq!(prompt.messages[0].content.as_deref(), Some("base prompt\n\nauditor system"));
+        assert_eq!(
+            prompt.messages[1].content.as_deref(),
+            Some("role user prefix\nfind docs")
         );
-        assert!(
-            system_messages
-                .iter()
-                .any(|message| message.contains("published_within_days"))
-        );
+        assert_eq!(prompt.current_user_prompt, "role user prefix\nfind docs");
     }
 
     #[test]
-    fn assemble_prompt_uses_search_only_browsing_policy_when_only_web_search_is_enabled() {
+    fn assemble_prompt_applies_role_user_prefix_only_when_requested() {
         let prompt = assemble_prompt(
-            &loaded_agent(vec!["web_search".to_string()]),
-            None,
+            &loaded_agent(vec!["bash".to_string()]),
+            Some(&loaded_role(Some("auditor system"), Some("role user prefix"))),
+            false,
             &[],
             "find docs",
             None,
         )
         .expect("prompt assembly");
 
-        let system_messages = system_messages(&prompt);
-        assert!(
-            system_messages
-                .iter()
-                .any(|message| message.contains("Use web_search to discover relevant sources"))
-        );
-        assert!(
-            system_messages
-                .iter()
-                .all(|message| !message.contains("Use web_fetch for live verification"))
-        );
+        assert_eq!(prompt.messages[0].content.as_deref(), Some("base prompt\n\nauditor system"));
+        assert_eq!(prompt.messages[1].content.as_deref(), Some("find docs"));
+        assert_eq!(prompt.current_user_prompt, "find docs");
     }
 
     #[test]
-    fn assemble_prompt_uses_fetch_only_browsing_policy_when_only_web_fetch_is_enabled() {
+    fn assemble_prompt_skips_empty_role_sections() {
         let prompt = assemble_prompt(
-            &loaded_agent(vec!["web_fetch".to_string()]),
-            None,
+            &loaded_agent(vec!["bash".to_string()]),
+            Some(&loaded_role(Some("   "), Some("   "))),
+            true,
             &[],
             "find docs",
             None,
         )
         .expect("prompt assembly");
 
-        let system_messages = system_messages(&prompt);
-        assert!(
-            system_messages
-                .iter()
-                .any(|message| message.contains("Use web_fetch to read specific live pages"))
-        );
-        assert!(
-            system_messages
-                .iter()
-                .all(|message| !message.contains("Use web_search first"))
-        );
-        assert!(
-            system_messages
-                .iter()
-                .all(|message| !message.contains("published_within_days"))
-        );
+        assert_eq!(prompt.messages[0].content.as_deref(), Some("base prompt"));
+        assert_eq!(prompt.messages[1].content.as_deref(), Some("find docs"));
     }
 }

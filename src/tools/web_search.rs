@@ -9,11 +9,11 @@ use crate::{
     provider::exa::{
         ExaClient, HighlightsSpec, SearchContentsSpec, SearchRequest, SearchResponse, SearchResult,
     },
-    tools::{ToolContext, optional_string_array, require_non_empty_trimmed_string},
+    tools::{ToolContext, require_non_empty_trimmed_string},
 };
 
-const AUTO_TIMEOUT: Duration = Duration::from_secs(5);
-const NEURAL_TIMEOUT: Duration = Duration::from_secs(5);
+const AUTO_TIMEOUT: Duration = Duration::from_secs(15);
+const NEURAL_TIMEOUT: Duration = Duration::from_secs(10);
 const DEEP_TIMEOUT: Duration = Duration::from_secs(60);
 const DEFAULT_SEARCH_TYPE: &str = "auto";
 const DEFAULT_NUM_RESULTS: usize = 5;
@@ -24,7 +24,7 @@ const ALLOWED_SEARCH_TYPES: &[&str] = &["auto", "neural", "deep"];
 pub fn web_search_spec() -> crate::tools::ToolSpec {
     crate::tools::ToolSpec {
         name: "web_search",
-        description: "Search the web for relevant sources. Returns URLs with key highlights. Use this first when you need current or external information. Follow up with web_fetch when a live page read is needed.",
+        description: "Search the web for relevant sources with Exa. Use this first when you need current or external information, then use web_fetch for live verification or deeper reading. Supports type=auto|neural|deep. Requires EXA_API_KEY in the environment. Cite the exact URLs you use in the final answer.",
         parameters: json!({
             "type": "object",
             "properties": {
@@ -65,7 +65,8 @@ pub fn run_web_search(context: &ToolContext<'_>, arguments: &Value) -> Result<Va
     let timeout = context
         .remaining_budget()?
         .min(search_timeout_for_type(&input.search_type));
-    let output = search(input, timeout)?;
+    let client = context.exa_client()?;
+    let output = search_with_client(input, timeout, OffsetDateTime::now_utc(), &client)?;
     serde_json::to_value(output).map_err(AppError::from)
 }
 
@@ -86,13 +87,17 @@ pub fn search_cli(
         exclude_domains,
     )?;
     let timeout = search_timeout_for_type(&input.search_type);
-    search(input, timeout)
+    let client = ExaClient::from_env()?;
+    search_with_client(input, timeout, OffsetDateTime::now_utc(), &client)
 }
 
 pub fn render_cli_output(result: &WebSearchOutput) -> String {
     let mut output = String::new();
     output.push_str(&format!("Query:          {}\n", result.query));
     output.push_str(&format!("Type:           {}\n", result.search_type));
+    if let Some(requested_type) = &result.requested_type {
+        output.push_str(&format!("Requested type: {}\n", requested_type));
+    }
     output.push_str(&format!("Requested:      {}\n", result.num_results));
     output.push_str(&format!("Result count:   {}\n", result.result_count));
     if result.results.is_empty() {
@@ -139,6 +144,8 @@ pub struct WebSearchOutput {
     pub query: String,
     #[serde(rename = "type")]
     pub search_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requested_type: Option<String>,
     pub num_results: usize,
     pub results: Vec<WebSearchResultOutput>,
     pub result_count: usize,
@@ -155,11 +162,6 @@ pub struct WebSearchResultOutput {
     pub score: Option<f64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub highlights: Vec<String>,
-}
-
-fn search(input: WebSearchInput, timeout: Duration) -> Result<WebSearchOutput, AppError> {
-    let client = ExaClient::from_env()?;
-    search_with_client(input, timeout, OffsetDateTime::now_utc(), &client)
 }
 
 fn search_with_client(
@@ -202,10 +204,17 @@ fn build_search_request(
 
 fn build_search_output(
     query: String,
-    search_type: String,
+    requested_search_type: String,
     num_results: usize,
     response: SearchResponse,
 ) -> WebSearchOutput {
+    let effective_search_type = response
+        .search_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(&requested_search_type)
+        .to_string();
     let results = response
         .results
         .into_iter()
@@ -214,7 +223,9 @@ fn build_search_output(
     let result_count = results.len();
     WebSearchOutput {
         query,
-        search_type,
+        requested_type: (effective_search_type != requested_search_type)
+            .then_some(requested_search_type),
+        search_type: effective_search_type,
         num_results,
         results,
         result_count,
@@ -236,8 +247,8 @@ fn parse_search_input(arguments: &Value) -> Result<WebSearchInput, AppError> {
     let search_type = parse_search_type(arguments)?;
     let num_results = parse_num_results(arguments)?;
     let published_within_days = parse_published_within_days(arguments)?;
-    let include_domains = normalize_domains(optional_string_array(arguments, "include_domains")?);
-    let exclude_domains = normalize_domains(optional_string_array(arguments, "exclude_domains")?);
+    let include_domains = parse_domain_array(arguments, "include_domains")?;
+    let exclude_domains = parse_domain_array(arguments, "exclude_domains")?;
     ensure_no_domain_overlap(&include_domains, &exclude_domains)?;
 
     Ok(WebSearchInput {
@@ -303,7 +314,7 @@ fn parse_search_type(arguments: &Value) -> Result<String, AppError> {
     validate_search_type(Some(raw))
 }
 
-fn validate_search_type(value: Option<&str>) -> Result<String, AppError> {
+pub(crate) fn validate_search_type(value: Option<&str>) -> Result<String, AppError> {
     let Some(raw) = value else {
         return Ok(DEFAULT_SEARCH_TYPE.to_string());
     };
@@ -332,7 +343,7 @@ fn parse_num_results(arguments: &Value) -> Result<usize, AppError> {
     validate_num_results(Some(num_results))
 }
 
-fn validate_num_results(value: Option<u64>) -> Result<usize, AppError> {
+pub(crate) fn validate_num_results(value: Option<u64>) -> Result<usize, AppError> {
     let Some(num_results) = value else {
         return Ok(DEFAULT_NUM_RESULTS);
     };
@@ -373,7 +384,7 @@ fn parse_published_within_days(arguments: &Value) -> Result<Option<usize>, AppEr
     validate_published_within_days(Some(days))
 }
 
-fn validate_published_within_days(value: Option<u64>) -> Result<Option<usize>, AppError> {
+pub(crate) fn validate_published_within_days(value: Option<u64>) -> Result<Option<usize>, AppError> {
     let Some(days) = value else {
         return Ok(None);
     };
@@ -403,6 +414,27 @@ fn normalize_domains(domains: Vec<String>) -> Vec<String> {
         }
     }
     normalized
+}
+
+fn parse_domain_array(arguments: &Value, key: &str) -> Result<Vec<String>, AppError> {
+    let Some(value) = arguments.get(key) else {
+        return Ok(Vec::new());
+    };
+    if value.is_null() {
+        return Ok(Vec::new());
+    }
+    let items = value.as_array().ok_or_else(|| {
+        AppError::Tool(format!("tool argument `{key}` must be an array of strings"))
+    })?;
+    let domains = items
+        .iter()
+        .map(|item| {
+            item.as_str().map(ToOwned::to_owned).ok_or_else(|| {
+                AppError::Tool(format!("tool argument `{key}` must be an array of strings"))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(normalize_domains(domains))
 }
 
 fn ensure_no_domain_overlap(
@@ -443,24 +475,19 @@ fn compact_strings(values: Vec<String>) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        io::{Read, Write},
-        net::{SocketAddr, TcpListener},
-        sync::{Arc, Mutex},
-        thread,
-        time::Duration,
-    };
+    use std::time::Duration;
 
     use serde_json::{Value, json};
     use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time};
 
     use super::{
         WebSearchInput, build_cli_input, build_search_output, build_search_request,
-        parse_search_input, search_with_client,
+        parse_search_input, render_cli_output, search_with_client,
     };
     use crate::{
         error::AppError,
         provider::exa::{ExaClient, SearchResponse, SearchResult},
+        test_support::{request_json, spawn_json_http_server},
     };
 
     fn fixed_now() -> OffsetDateTime {
@@ -469,76 +496,6 @@ mod tests {
             Time::MIDNIGHT,
         )
         .assume_utc()
-    }
-
-    fn spawn_http_server(
-        response_status: &str,
-        response_body: &str,
-    ) -> (SocketAddr, Arc<Mutex<String>>, thread::JoinHandle<()>) {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind test listener");
-        let address = listener.local_addr().expect("listener addr");
-        let request = Arc::new(Mutex::new(String::new()));
-        let captured_request = Arc::clone(&request);
-        let status = response_status.to_string();
-        let body = response_body.to_string();
-        let handle = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept request");
-            let mut request_bytes = Vec::new();
-            let mut buffer = [0u8; 1024];
-            loop {
-                let bytes_read = stream.read(&mut buffer).expect("read request");
-                if bytes_read == 0 {
-                    break;
-                }
-                request_bytes.extend_from_slice(&buffer[..bytes_read]);
-                if request_complete(&request_bytes) {
-                    break;
-                }
-            }
-            *captured_request.lock().expect("capture request") =
-                String::from_utf8_lossy(&request_bytes).into_owned();
-            let response = format!(
-                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            stream
-                .write_all(response.as_bytes())
-                .expect("write response");
-        });
-        (address, request, handle)
-    }
-
-    fn request_complete(bytes: &[u8]) -> bool {
-        let Some(header_end) = find_bytes(bytes, b"\r\n\r\n") else {
-            return false;
-        };
-        let headers = String::from_utf8_lossy(&bytes[..header_end]);
-        let content_length = headers
-            .lines()
-            .find_map(|line| {
-                let (name, value) = line.split_once(':')?;
-                if !name.eq_ignore_ascii_case("content-length") {
-                    return None;
-                }
-                value.trim().parse::<usize>().ok()
-            })
-            .unwrap_or(0);
-        bytes.len() >= header_end + 4 + content_length
-    }
-
-    fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-        haystack
-            .windows(needle.len())
-            .position(|window| window == needle)
-    }
-
-    fn request_json(raw_request: &str) -> Value {
-        let body = raw_request
-            .split_once("\r\n\r\n")
-            .map(|(_, body)| body)
-            .expect("request body");
-        serde_json::from_str(body).expect("request json")
     }
 
     #[test]
@@ -631,11 +588,11 @@ mod tests {
     fn search_timeout_depends_on_type() {
         assert_eq!(
             super::search_timeout_for_type("auto"),
-            Duration::from_secs(5)
+            Duration::from_secs(15)
         );
         assert_eq!(
             super::search_timeout_for_type("neural"),
-            Duration::from_secs(5)
+            Duration::from_secs(10)
         );
         assert_eq!(
             super::search_timeout_for_type("deep"),
@@ -744,9 +701,9 @@ mod tests {
 
     #[test]
     fn search_with_client_uses_fake_exa_server_and_returns_structured_output() {
-        let (address, request, handle) = spawn_http_server(
+        let (address, request, handle) = spawn_json_http_server(
             "200 OK",
-            r#"{"results":[{"title":"Rust Docs","url":"https://docs.rs","publishedDate":"2026-04-01T00:00:00Z","score":0.9,"highlights":[" Rust docs "]}]}"#,
+            r#"{"results":[{"title":"Rust Docs","url":"https://docs.rs","publishedDate":"2026-04-01T00:00:00Z","score":0.9,"highlights":[" Rust docs "]}],"searchType":"neural"}"#,
         );
         let client = ExaClient::with_base_url(format!("http://{address}"), "test-key".to_string());
         let input = WebSearchInput {
@@ -763,14 +720,21 @@ mod tests {
         handle.join().expect("join server");
 
         assert_eq!(output.query, "rust");
-        assert_eq!(output.search_type, "auto");
+        assert_eq!(output.search_type, "neural");
+        assert_eq!(output.requested_type.as_deref(), Some("auto"));
         assert_eq!(output.num_results, 5);
         assert_eq!(output.result_count, 1);
         assert_eq!(output.results[0].title.as_deref(), Some("Rust Docs"));
         assert_eq!(output.results[0].url, "https://docs.rs");
         assert_eq!(output.results[0].highlights, vec!["Rust docs"]);
 
-        let request_json = request_json(&request.lock().expect("request lock"));
+        let raw_request = request.lock().expect("request lock").clone();
+        assert!(
+            raw_request
+                .to_ascii_lowercase()
+                .contains("accept: application/json")
+        );
+        let request_json = request_json(&raw_request);
         assert_eq!(request_json["query"], "rust");
         assert_eq!(request_json["type"], "auto");
         assert_eq!(request_json["numResults"], 5);
@@ -783,6 +747,7 @@ mod tests {
     #[test]
     fn search_output_preserves_all_results_without_truncation() {
         let response = SearchResponse {
+            search_type: None,
             results: (0..11)
                 .map(|index| SearchResult {
                     title: Some(format!("Result {index}")),
@@ -801,6 +766,7 @@ mod tests {
         assert_eq!(output.result_count, 11);
         assert_eq!(output.results.len(), 11);
         assert_eq!(output.num_results, 5);
+        assert_eq!(output.requested_type, None);
 
         let output_json = serde_json::to_value(&output).expect("output json");
         assert_eq!(output_json["results"].as_array().map(Vec::len), Some(11));
@@ -810,6 +776,7 @@ mod tests {
     #[test]
     fn search_output_omits_empty_optional_fields() {
         let response = SearchResponse {
+            search_type: None,
             results: vec![SearchResult {
                 title: Some(" ".to_string()),
                 url: "https://example.com".to_string(),
@@ -836,5 +803,46 @@ mod tests {
         assert!(first.get("published_date").is_none());
         assert!(first.get("score").is_none());
         assert!(first.get("highlights").is_none());
+    }
+
+    #[test]
+    fn search_output_uses_effective_search_type_when_response_overrides_request() {
+        let response = SearchResponse {
+            search_type: Some("deep".to_string()),
+            results: Vec::new(),
+        };
+
+        let output = build_search_output("rust".to_string(), "auto".to_string(), 5, response);
+        assert_eq!(output.search_type, "deep");
+        assert_eq!(output.requested_type.as_deref(), Some("auto"));
+
+        let output_json = serde_json::to_value(&output).expect("output json");
+        assert_eq!(output_json["type"], "deep");
+        assert_eq!(output_json["requested_type"], "auto");
+    }
+
+    #[test]
+    fn render_cli_output_includes_requested_type_only_when_effective_type_differs() {
+        let with_override = render_cli_output(&super::WebSearchOutput {
+            query: "rust".to_string(),
+            search_type: "neural".to_string(),
+            requested_type: Some("auto".to_string()),
+            num_results: 5,
+            results: Vec::new(),
+            result_count: 0,
+        });
+        assert!(with_override.contains("Type:           neural"));
+        assert!(with_override.contains("Requested type: auto"));
+
+        let without_override = render_cli_output(&super::WebSearchOutput {
+            query: "rust".to_string(),
+            search_type: "auto".to_string(),
+            requested_type: None,
+            num_results: 5,
+            results: Vec::new(),
+            result_count: 0,
+        });
+        assert!(without_override.contains("Type:           auto"));
+        assert!(!without_override.contains("Requested type:"));
     }
 }

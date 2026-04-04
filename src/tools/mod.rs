@@ -8,8 +8,8 @@ pub mod web_search;
 
 use std::{
     cell::RefCell,
-    collections::HashSet,
     path::{Path, PathBuf},
+    sync::OnceLock,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -23,6 +23,7 @@ use crate::{
     artifact::store_text_artifact,
     config::GlobalConfig,
     error::AppError,
+    provider::exa::ExaClient,
     session::{SessionExecutionGuard, SessionStore},
     types::ToolExecution,
 };
@@ -78,6 +79,7 @@ pub struct ToolContext<'a> {
     pub shell_args: &'a [String],
     pub run_control: &'a RunControl,
     sequence: AtomicUsize,
+    exa_client: OnceLock<Result<ExaClient, String>>,
 }
 
 impl RunControl {
@@ -154,6 +156,7 @@ impl<'a> ToolContext<'a> {
             shell_args,
             run_control,
             sequence: AtomicUsize::new(1),
+            exa_client: OnceLock::new(),
         }
     }
 
@@ -193,6 +196,14 @@ impl<'a> ToolContext<'a> {
 
     pub fn check_interrupted(&self) -> Result<(), AppError> {
         self.run_control.check_interrupted()
+    }
+
+    pub fn exa_client(&self) -> Result<ExaClient, AppError> {
+        self.exa_client
+            .get_or_init(|| ExaClient::from_env().map_err(|error| error.to_string()))
+            .as_ref()
+            .cloned()
+            .map_err(|message| AppError::Tool(message.clone()))
     }
 }
 
@@ -345,32 +356,4 @@ pub fn optional_bool(arguments: &Value, key: &str, default: bool) -> bool {
 
 pub fn optional_u64(arguments: &Value, key: &str) -> Option<u64> {
     arguments.get(key).and_then(Value::as_u64)
-}
-
-pub fn optional_string_array(arguments: &Value, key: &str) -> Result<Vec<String>, AppError> {
-    let Some(value) = arguments.get(key) else {
-        return Ok(Vec::new());
-    };
-    if value.is_null() {
-        return Ok(Vec::new());
-    }
-    let items = value.as_array().ok_or_else(|| {
-        AppError::Tool(format!("tool argument `{key}` must be an array of strings"))
-    })?;
-    let mut seen = HashSet::new();
-    let mut normalized = Vec::new();
-    for item in items {
-        let value = item.as_str().ok_or_else(|| {
-            AppError::Tool(format!("tool argument `{key}` must be an array of strings"))
-        })?;
-        let trimmed = value.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let owned = trimmed.to_string();
-        if seen.insert(owned.clone()) {
-            normalized.push(owned);
-        }
-    }
-    Ok(normalized)
 }

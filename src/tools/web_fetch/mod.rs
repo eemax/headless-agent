@@ -54,7 +54,7 @@ const NOISY_TOKEN_SUBSTRINGS: &[&str] = &[
 pub fn web_fetch_spec() -> crate::tools::ToolSpec {
     crate::tools::ToolSpec {
         name: "web_fetch",
-        description: "Fetch a single URL and return cleaned text plus structured fetch metadata. Use when you need page content, docs, help articles, policies, changelogs, or JSON from the web.",
+        description: "Fetch a single URL and return cleaned text plus structured fetch metadata. Use this after web_search when you need live verification or deeper reading from a specific page. Cite the exact URL you fetched in the final answer.",
         parameters: json!({
             "type": "object",
             "properties": {

@@ -160,6 +160,7 @@ Current built-in tools:
 - `grep`
 - `apply_patch`
 - `bash`
+- `web_search`
 - `web_fetch`
 
 Tool properties:
@@ -168,9 +169,10 @@ Tool properties:
 - return deterministic JSON payloads
 - persist their payloads through the artifact layer
 - in `--plan` mode, all tools become non-executing and return planned-action payloads
-- `read_file`, `glob`, and `grep` are retried on ordinary tool errors; `web_fetch` is read-only and still single-attempt at the framework level, but it performs bounded internal address fallback before returning a transport failure; mutating tools are single-attempt
+- `read_file`, `glob`, and `grep` are retried on ordinary tool errors; `web_search` and `web_fetch` are read-only and single-attempt at the framework level, and `web_fetch` performs bounded internal address fallback before returning a transport failure; mutating tools are single-attempt
 - `bash` is treated as mutating and is killed on timeout, including its subprocess group
 - `apply_patch` keeps parsing and staging cancellable, but once filesystem commit begins it no longer consults the run budget; it either commits fully or rolls back
+- `web_search` currently exposes the simplified Exa mode subset `auto|neural|deep`, even though the upstream API supports additional modes
 
 ## Artifacts
 
