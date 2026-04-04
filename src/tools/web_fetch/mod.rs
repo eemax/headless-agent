@@ -49,6 +49,12 @@ const NOISY_TOKEN_SUBSTRINGS: &[&str] = &[
     "breadcrumb",
     "advert",
     "promo",
+    "copyright",
+    "newsletter",
+    "subscribe",
+    "login",
+    "register",
+    "banner",
 ];
 
 pub fn web_fetch_spec() -> crate::tools::ToolSpec {

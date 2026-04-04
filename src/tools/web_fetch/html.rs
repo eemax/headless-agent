@@ -16,6 +16,20 @@ use super::{
 
 static SELECTORS: OnceLock<Result<Selectors, String>> = OnceLock::new();
 const MAX_SHELL_MARKER_SCAN_BYTES: usize = 64 * 1024;
+const NAV_HEADING_PHRASES: &[&str] = &[
+    "related",
+    "recommended",
+    "popular",
+    "trending",
+    "more articles",
+    "more stories",
+    "you may also like",
+    "you might also like",
+    "also read",
+    "further reading",
+    "most read",
+    "top stories",
+];
 
 #[derive(Debug)]
 struct Selectors {
@@ -597,12 +611,23 @@ fn evaluate_root_candidate<'a>(
     let mut code_block_count = 0usize;
     let mut table_count = 0usize;
     let mut link_text_len = 0usize;
+    let mut nav_heading_count = 0usize;
     for element in root.element.descendent_elements() {
         match element.value().name() {
             "p" | "figcaption" => paragraph_count += 1,
             "li" => list_item_count += 1,
             "pre" => code_block_count += 1,
             "table" => table_count += 1,
+            "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
+                let heading_text =
+                    normalize_inline(&element.text().collect::<String>()).to_ascii_lowercase();
+                if NAV_HEADING_PHRASES
+                    .iter()
+                    .any(|phrase| heading_text.contains(phrase))
+                {
+                    nav_heading_count += 1;
+                }
+            }
             "a" => {
                 link_text_len += normalize_inline(&element.text().collect::<String>())
                     .chars()
@@ -611,22 +636,27 @@ fn evaluate_root_candidate<'a>(
             _ => {}
         }
     }
+    let comma_count = rendered.text.chars().filter(|&ch| ch == ',').count() as f64;
     let link_density = (link_text_len as f64 / visible_len).clamp(0.0, 1.0);
     let noise_penalty = noisy_token_penalty(root.element);
     let body_penalty = matches!(root.source, RootSource::Body)
         .then_some(120.0)
         .unwrap_or(0.0);
     let low_signal_penalty = low_signal.then_some(140.0).unwrap_or(0.0);
-    let score = visible_len
+    let nav_heading_penalty = nav_heading_count as f64 * 90.0;
+    let content_score = visible_len
         + (paragraph_count as f64 * 18.0)
         + (list_item_count as f64 * 8.0)
         + (code_block_count as f64 * 30.0)
         + (table_count as f64 * 20.0)
         + (yield_ratio * 220.0)
-        - (link_density * 160.0)
+        + (comma_count * 1.5);
+    let link_multiplier = 1.0 - (link_density * 0.85);
+    let score = (content_score * link_multiplier)
         - noise_penalty
         - body_penalty
-        - low_signal_penalty;
+        - low_signal_penalty
+        - nav_heading_penalty;
 
     RootCandidate {
         root,
@@ -787,4 +817,129 @@ fn contains_ascii_case_insensitive(haystack: &[u8], needle: &[u8]) -> bool {
     haystack
         .windows(needle.len())
         .any(|window| window.eq_ignore_ascii_case(needle))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn candidate_score(html: &str, selector: &str, source: RootSource) -> f64 {
+        let document = Html::parse_document(html);
+        let selector = Selector::parse(selector).expect("selector");
+        let element = document.select(&selector).next().expect("element");
+
+        evaluate_root_candidate(
+            RootSelection {
+                element,
+                kind: ExtractionKind::HtmlPrimary,
+                source,
+            },
+            None,
+        )
+        .score
+    }
+
+    fn noisy_penalty(html: &str, selector: &str) -> f64 {
+        let document = Html::parse_document(html);
+        let selector = Selector::parse(selector).expect("selector");
+        let element = document.select(&selector).next().expect("element");
+        noisy_token_penalty(element)
+    }
+
+    #[test]
+    fn link_density_scaling_prefers_clean_article_over_large_link_hub() {
+        let link_cluster =
+            "<a href='/story'>Platform launch guide and release notes</a> ".repeat(70);
+        let html = format!(
+            r#"
+            <html>
+              <body>
+                <div id="content"><p>{link_cluster}</p></div>
+                <article>
+                  <p>This article explains how the worker pool initializes, how retries behave, and how operators should verify rollout health during deployment.</p>
+                  <p>It also covers failure handling, metrics, incident response, migration sequencing, cache invalidation, and compatibility expectations for older clients.</p>
+                  <p>Operators can use it to validate deploy order, compare health signals between regions, confirm alert routing, and rehearse rollback steps before customer traffic shifts.</p>
+                </article>
+              </body>
+            </html>
+            "#
+        );
+
+        let link_hub_score = candidate_score(&html, "#content", RootSource::IdContent);
+        let article_score = candidate_score(&html, "article", RootSource::Article);
+
+        assert!(
+            article_score > link_hub_score,
+            "expected clean article to outrank link hub, article={article_score}, link_hub={link_hub_score}"
+        );
+    }
+
+    #[test]
+    fn comma_density_breaks_ties_in_favor_of_prose() {
+        let html = r#"
+            <html>
+              <body>
+                <article id="prose">
+                  <p>Alpha, beta, gamma, delta, epsilon, zeta, eta, theta, iota, kappa.</p>
+                  <p>Lambda, mu, nu, xi, omicron, pi, rho, sigma, tau, upsilon.</p>
+                </article>
+                <article id="listy">
+                  <p>Alpha beta gamma delta epsilon zeta eta theta iota kappa.</p>
+                  <p>Lambda mu nu xi omicron pi rho sigma tau upsilon.</p>
+                </article>
+              </body>
+            </html>
+        "#;
+
+        let prose_score = candidate_score(html, "#prose", RootSource::Article);
+        let listy_score = candidate_score(html, "#listy", RootSource::Article);
+
+        assert!(
+            prose_score > listy_score,
+            "expected prose candidate to score higher, prose={prose_score}, listy={listy_score}"
+        );
+    }
+
+    #[test]
+    fn navigation_headings_reduce_candidate_score() {
+        let html = r#"
+            <html>
+              <body>
+                <section id="nav-heading">
+                  <h2>Related Articles</h2>
+                  <p><a href="/one">Compiler pipeline guide</a>, release notes, migration checklist, rollback drill, and incident guide.</p>
+                  <p><a href="/two">Storage tuning handbook</a>, cache policy update, schema notes, and deployment sequencing.</p>
+                </section>
+                <section id="neutral-heading">
+                  <h2>Implementation Notes</h2>
+                  <p><a href="/one">Compiler pipeline guide</a>, release notes, migration checklist, rollback drill, and incident guide.</p>
+                  <p><a href="/two">Storage tuning handbook</a>, cache policy update, schema notes, and deployment sequencing.</p>
+                </section>
+              </body>
+            </html>
+        "#;
+
+        let nav_score = candidate_score(html, "#nav-heading", RootSource::ClassContent);
+        let neutral_score = candidate_score(html, "#neutral-heading", RootSource::ClassContent);
+
+        assert!(
+            neutral_score > nav_score,
+            "expected navigation heading to be penalized, neutral={neutral_score}, nav={nav_score}"
+        );
+    }
+
+    #[test]
+    fn newsletter_roots_receive_a_noisy_token_penalty() {
+        let html = r#"
+            <html>
+              <body>
+                <section class="newsletter-widget">
+                  <p>Subscribe for updates and release notes.</p>
+                </section>
+              </body>
+            </html>
+        "#;
+
+        assert_eq!(noisy_penalty(html, ".newsletter-widget"), 35.0);
+    }
 }

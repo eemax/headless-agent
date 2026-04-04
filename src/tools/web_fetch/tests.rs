@@ -769,6 +769,39 @@ fn noisy_token_matching_avoids_mid_token_false_positives() {
 }
 
 #[test]
+fn newsletter_widgets_are_pruned_without_hiding_article_content() {
+    let result = html_output(
+        r#"
+        <html>
+          <body>
+            <main>
+              <h1>Release Guide</h1>
+              <div class="newsletter-widget">
+                <p>Subscribe for release updates and weekly summaries.</p>
+              </div>
+              <p>This guide explains how to roll out the service safely, how to verify health checks, and how to recover from a failed migration.</p>
+              <p>It also covers logging, metrics, retries, compatibility expectations, and post-deploy validation for older clients.</p>
+            </main>
+          </body>
+        </html>
+        "#,
+    );
+
+    assert_eq!(result.kind, super::ExtractionKind::HtmlPrimary);
+    assert!(result.content.contains("Title: Release Guide"));
+    assert!(
+        result
+            .content
+            .contains("This guide explains how to roll out the service safely")
+    );
+    assert!(
+        !result
+            .content
+            .contains("Subscribe for release updates and weekly summaries.")
+    );
+}
+
+#[test]
 fn nested_lists_render_with_indentation() {
     let result = html_output(
         r#"

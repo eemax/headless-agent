@@ -458,8 +458,8 @@ fn ensure_no_domain_overlap(
 
 fn compact_optional_string(value: Option<String>) -> Option<String> {
     value.and_then(|entry| {
-        let trimmed = entry.trim();
-        (!trimmed.is_empty()).then(|| trimmed.to_string())
+        let normalized = normalize_whitespace(&entry);
+        (!normalized.is_empty()).then_some(normalized)
     })
 }
 
@@ -467,10 +467,58 @@ fn compact_strings(values: Vec<String>) -> Vec<String> {
     values
         .into_iter()
         .filter_map(|value| {
-            let trimmed = value.trim();
-            (!trimmed.is_empty()).then(|| trimmed.to_string())
+            let normalized = normalize_whitespace(&value);
+            (!normalized.is_empty()).then_some(normalized)
         })
         .collect()
+}
+
+/// Normalize scraped web content whitespace:
+/// - \r\n → \n
+/// - collapse runs of spaces/tabs within a line to a single space
+/// - trim trailing whitespace per line
+/// - collapse 3+ consecutive newlines to 2 (one blank line max)
+/// - trim leading/trailing whitespace from the whole string
+fn normalize_whitespace(input: &str) -> String {
+    let input = input.replace("\r\n", "\n");
+    let mut result = String::with_capacity(input.len());
+    for line in input.split('\n') {
+        // Collapse runs of horizontal whitespace within the line and trim leading space
+        let mut prev_space = true; // start true to skip leading whitespace
+        for ch in line.chars() {
+            if ch == ' ' || ch == '\t' {
+                if !prev_space {
+                    result.push(' ');
+                }
+                prev_space = true;
+            } else {
+                result.push(ch);
+                prev_space = false;
+            }
+        }
+        // Trim trailing space we may have just added
+        while result.ends_with(' ') {
+            result.pop();
+        }
+        result.push('\n');
+    }
+
+    // Collapse 3+ consecutive newlines to 2
+    let mut collapsed = String::with_capacity(result.len());
+    let mut newline_count = 0u32;
+    for ch in result.chars() {
+        if ch == '\n' {
+            newline_count += 1;
+            if newline_count <= 2 {
+                collapsed.push('\n');
+            }
+        } else {
+            newline_count = 0;
+            collapsed.push(ch);
+        }
+    }
+
+    collapsed.trim().to_string()
 }
 
 #[cfg(test)]
@@ -844,5 +892,36 @@ mod tests {
         });
         assert!(without_override.contains("Type:           auto"));
         assert!(!without_override.contains("Requested type:"));
+    }
+
+    #[test]
+    fn normalize_whitespace_collapses_blank_lines_and_horizontal_runs() {
+        use super::normalize_whitespace;
+
+        // Collapse 3+ newlines to 2
+        assert_eq!(normalize_whitespace("a\n\n\nb"), "a\n\nb");
+        assert_eq!(normalize_whitespace("a\n\n\n\n\nb"), "a\n\nb");
+
+        // Preserve single blank line (2 newlines)
+        assert_eq!(normalize_whitespace("a\n\nb"), "a\n\nb");
+
+        // Collapse horizontal whitespace runs
+        assert_eq!(normalize_whitespace("a   b\t\tc"), "a b c");
+
+        // Trim trailing whitespace per line
+        assert_eq!(normalize_whitespace("a   \nb"), "a\nb");
+
+        // \r\n → \n
+        assert_eq!(normalize_whitespace("a\r\n\r\nb"), "a\n\nb");
+
+        // Combined: messy scraped content
+        assert_eq!(
+            normalize_whitespace("  hello   world  \n\n\n\n  foo  \n\n  bar  "),
+            "hello world\n\nfoo\n\nbar"
+        );
+
+        // Empty / whitespace-only
+        assert_eq!(normalize_whitespace(""), "");
+        assert_eq!(normalize_whitespace("  \n\n\n  "), "");
     }
 }
