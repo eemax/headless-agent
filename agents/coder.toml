@@ -21,6 +21,7 @@ enabled_tools = [
   "grep",
   "apply_patch",
   "bash",
+  "web_search",
   "web_fetch",
 ]
 

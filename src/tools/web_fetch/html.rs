@@ -613,10 +613,12 @@ fn evaluate_root_candidate<'a>(
     }
     let link_density = (link_text_len as f64 / visible_len).clamp(0.0, 1.0);
     let noise_penalty = noisy_token_penalty(root.element);
-    let body_penalty = matches!(root.source, RootSource::Body)
-        .then_some(120.0)
-        .unwrap_or(0.0);
-    let low_signal_penalty = low_signal.then_some(140.0).unwrap_or(0.0);
+    let body_penalty = if matches!(root.source, RootSource::Body) {
+        120.0
+    } else {
+        0.0
+    };
+    let low_signal_penalty = if low_signal { 140.0 } else { 0.0 };
     let score = visible_len
         + (paragraph_count as f64 * 18.0)
         + (list_item_count as f64 * 8.0)

@@ -4,9 +4,11 @@ pub mod glob;
 pub mod grep;
 pub mod patch;
 pub mod web_fetch;
+pub mod web_search;
 
 use std::{
     cell::RefCell,
+    collections::HashSet,
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -205,6 +207,7 @@ pub fn builtin_specs(enabled_tools: &[String]) -> Vec<ToolSpec> {
             "grep" => specs.push(grep::grep_spec()),
             "apply_patch" => specs.push(patch::apply_patch_spec()),
             "bash" => specs.push(bash::bash_spec()),
+            "web_search" => specs.push(web_search::web_search_spec()),
             "web_fetch" => specs.push(web_fetch::web_fetch_spec()),
             _ => {}
         }
@@ -250,6 +253,7 @@ pub fn execute_tool(
         "grep" => grep::grep_search(context, arguments)?,
         "apply_patch" => patch::apply_patch(context, arguments)?,
         "bash" => bash::run_bash(context, arguments)?,
+        "web_search" => web_search::run_web_search(context, arguments)?,
         "web_fetch" => web_fetch::run_web_fetch(context, arguments)?,
         _ => {
             return context.finalize(
@@ -269,6 +273,10 @@ pub fn tool_behavior(name: &str) -> Option<ToolBehavior> {
         "read_file" | "glob" | "grep" => Some(ToolBehavior {
             access: ToolAccess::ReadOnly,
             retryable: true,
+        }),
+        "web_search" => Some(ToolBehavior {
+            access: ToolAccess::ReadOnly,
+            retryable: false,
         }),
         "web_fetch" => Some(ToolBehavior {
             access: ToolAccess::ReadOnly,
@@ -310,6 +318,17 @@ pub fn require_string(arguments: &Value, key: &str) -> Result<String, AppError> 
         .ok_or_else(|| AppError::Tool(format!("tool argument `{key}` must be a string")))
 }
 
+pub fn require_non_empty_trimmed_string(arguments: &Value, key: &str) -> Result<String, AppError> {
+    let value = require_string(arguments, key)?;
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::Tool(format!(
+            "tool argument `{key}` must be a non-empty string"
+        )));
+    }
+    Ok(trimmed.to_string())
+}
+
 pub fn optional_string(arguments: &Value, key: &str) -> Option<String> {
     arguments
         .get(key)
@@ -326,4 +345,32 @@ pub fn optional_bool(arguments: &Value, key: &str, default: bool) -> bool {
 
 pub fn optional_u64(arguments: &Value, key: &str) -> Option<u64> {
     arguments.get(key).and_then(Value::as_u64)
+}
+
+pub fn optional_string_array(arguments: &Value, key: &str) -> Result<Vec<String>, AppError> {
+    let Some(value) = arguments.get(key) else {
+        return Ok(Vec::new());
+    };
+    if value.is_null() {
+        return Ok(Vec::new());
+    }
+    let items = value.as_array().ok_or_else(|| {
+        AppError::Tool(format!("tool argument `{key}` must be an array of strings"))
+    })?;
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::new();
+    for item in items {
+        let value = item.as_str().ok_or_else(|| {
+            AppError::Tool(format!("tool argument `{key}` must be an array of strings"))
+        })?;
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let owned = trimmed.to_string();
+        if seen.insert(owned.clone()) {
+            normalized.push(owned);
+        }
+    }
+    Ok(normalized)
 }

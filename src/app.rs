@@ -19,7 +19,7 @@ use crate::{
     prompt::assemble_prompt,
     role_def::LoadedRole,
     session::{self, SessionCommit, SessionStore, new_id, now_rfc3339},
-    tools::web_fetch,
+    tools::{web_fetch, web_search},
     types::{LoopTermination, MessageRole, RunOutcome, RunResult, SessionMeta, TranscriptRecord},
 };
 
@@ -77,6 +77,27 @@ pub fn run(command: Command, interrupted: Arc<AtomicBool>) -> Result<AppOutput, 
             stdout: web_fetch::render_cli_output(&web_fetch::fetch_url(&url)),
             stderr: Vec::new(),
         }),
+        Command::WebSearch {
+            query,
+            search_type,
+            num_results,
+            published_within_days,
+            include_domains,
+            exclude_domains,
+        } => {
+            let result = web_search::search_cli(
+                &query,
+                search_type.as_deref(),
+                num_results,
+                published_within_days,
+                &include_domains,
+                &exclude_domains,
+            )?;
+            Ok(AppOutput {
+                stdout: web_search::render_cli_output(&result),
+                stderr: Vec::new(),
+            })
+        }
         Command::AgentList => Ok(AppOutput {
             stdout: format_lines(roots.list_agents()?),
             stderr: Vec::new(),

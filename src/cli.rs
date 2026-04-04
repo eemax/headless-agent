@@ -7,6 +7,7 @@ use crate::{error::AppError, types::Effort};
 const USAGE: &str = "usage:
   headless version
   headless webfetch <url>
+  headless websearch [--type <mode>] [--num_results <n>] [--published_within_days <n>] [--include_domains <domain>]... [--exclude_domains <domain>]... <query...>
   headless agent list
   headless role list
   headless session new
@@ -18,13 +19,27 @@ const USAGE: &str = "usage:
 #[derive(Debug, Clone)]
 pub enum Command {
     Version,
-    WebFetch { url: String },
+    WebFetch {
+        url: String,
+    },
+    WebSearch {
+        query: String,
+        search_type: Option<String>,
+        num_results: Option<usize>,
+        published_within_days: Option<usize>,
+        include_domains: Vec<String>,
+        exclude_domains: Vec<String>,
+    },
     AgentList,
     RoleList,
     SessionNew,
     SessionList,
-    SessionShow { id: String },
-    SessionStop { id: String },
+    SessionShow {
+        id: String,
+    },
+    SessionStop {
+        id: String,
+    },
     Run(RunArgs),
 }
 
@@ -71,6 +86,7 @@ where
             }
         }
         Some("webfetch") => parse_webfetch(&args),
+        Some("websearch") => parse_websearch(&args),
         Some("agent") => parse_simple_list("agent", &args, Command::AgentList),
         Some("role") => parse_simple_list("role", &args, Command::RoleList),
         Some("session") => parse_session_subcommand(&args),
@@ -89,6 +105,69 @@ fn parse_webfetch(args: &[OsString]) -> Result<Command, AppError> {
             "invalid `webfetch` command\n\n{USAGE}"
         )))
     }
+}
+
+fn parse_websearch(args: &[OsString]) -> Result<Command, AppError> {
+    let mut parser = Parser::from_args(args.iter().skip(1).cloned());
+    let mut search_type = None;
+    let mut num_results = None;
+    let mut published_within_days = None;
+    let mut include_domains = Vec::new();
+    let mut exclude_domains = Vec::new();
+    let mut query_parts = Vec::new();
+
+    while let Some(arg) = parser.next()? {
+        match arg {
+            lexopt::Arg::Long("type") => {
+                search_type = Some(parser.value()?.to_string_lossy().to_string());
+            }
+            lexopt::Arg::Long("num_results") => {
+                let raw = parser.value()?.to_string_lossy().to_string();
+                let parsed = raw.parse::<usize>().map_err(|_| {
+                    AppError::Usage(format!("invalid `--num_results` value `{raw}`\n\n{USAGE}"))
+                })?;
+                num_results = Some(parsed);
+            }
+            lexopt::Arg::Long("published_within_days") => {
+                let raw = parser.value()?.to_string_lossy().to_string();
+                let parsed = raw.parse::<usize>().map_err(|_| {
+                    AppError::Usage(format!(
+                        "invalid `--published_within_days` value `{raw}`\n\n{USAGE}"
+                    ))
+                })?;
+                published_within_days = Some(parsed);
+            }
+            lexopt::Arg::Long("include_domains") => {
+                include_domains.push(parser.value()?.to_string_lossy().to_string());
+            }
+            lexopt::Arg::Long("exclude_domains") => {
+                exclude_domains.push(parser.value()?.to_string_lossy().to_string());
+            }
+            lexopt::Arg::Value(value) => {
+                query_parts.push(value.to_string_lossy().to_string());
+            }
+            _ => {
+                return Err(AppError::Usage(format!(
+                    "invalid `websearch` command\n\n{USAGE}"
+                )));
+            }
+        }
+    }
+
+    if query_parts.is_empty() {
+        return Err(AppError::Usage(format!(
+            "missing search query for `websearch`\n\n{USAGE}"
+        )));
+    }
+
+    Ok(Command::WebSearch {
+        query: query_parts.join(" "),
+        search_type,
+        num_results,
+        published_within_days,
+        include_domains,
+        exclude_domains,
+    })
 }
 
 fn parse_simple_list(
@@ -207,4 +286,51 @@ fn parse_run_args(args: Vec<OsString>) -> Result<Command, AppError> {
         debug,
         prompt,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Command, parse_from_args};
+
+    #[test]
+    fn websearch_parses_query_and_flags() {
+        let command = parse_from_args([
+            "websearch",
+            "--type",
+            "neural",
+            "--num_results",
+            "8",
+            "--published_within_days",
+            "7",
+            "--include_domains",
+            "docs.rs",
+            "--include_domains",
+            "crates.io",
+            "--exclude_domains",
+            "example.com",
+            "rust",
+            "async",
+            "runtimes",
+        ])
+        .expect("parse websearch");
+
+        match command {
+            Command::WebSearch {
+                query,
+                search_type,
+                num_results,
+                published_within_days,
+                include_domains,
+                exclude_domains,
+            } => {
+                assert_eq!(query, "rust async runtimes");
+                assert_eq!(search_type.as_deref(), Some("neural"));
+                assert_eq!(num_results, Some(8));
+                assert_eq!(published_within_days, Some(7));
+                assert_eq!(include_domains, vec!["docs.rs", "crates.io"]);
+                assert_eq!(exclude_domains, vec!["example.com"]);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
 }

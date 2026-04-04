@@ -195,7 +195,6 @@ This is why run metadata such as the generated session id for `--session new` is
 Not implemented yet:
 - `todo_write`
 - `skills`
-- `web_search`
 - summary compaction
 - alternate providers
 - streaming responses
