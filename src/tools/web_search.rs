@@ -384,7 +384,9 @@ fn parse_published_within_days(arguments: &Value) -> Result<Option<usize>, AppEr
     validate_published_within_days(Some(days))
 }
 
-pub(crate) fn validate_published_within_days(value: Option<u64>) -> Result<Option<usize>, AppError> {
+pub(crate) fn validate_published_within_days(
+    value: Option<u64>,
+) -> Result<Option<usize>, AppError> {
     let Some(days) = value else {
         return Ok(None);
     };

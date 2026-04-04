@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{io, time::Duration};
 
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -86,7 +86,17 @@ fn send_chat_blocking(
     let response = match response {
         Ok(response) => response,
         Err(ureq::Error::Status(code, response)) => {
-            let body = response.into_string().unwrap_or_default();
+            let body = response.into_string().map_err(|error| {
+                if code == 408 {
+                    AppError::Timeout(format!(
+                        "OpenRouter returned HTTP {code}, but the error body could not be read: {error}"
+                    ))
+                } else {
+                    AppError::Provider(format!(
+                        "OpenRouter returned HTTP {code}, but the error body could not be read: {error}"
+                    ))
+                }
+            })?;
             let message = extract_error_message(&body)
                 .unwrap_or_else(|| format!("OpenRouter returned HTTP {code}"));
             return if code == 408 {
@@ -107,8 +117,15 @@ fn send_chat_blocking(
         }
     };
 
-    let parsed: ChatResponse = response.into_json().map_err(|err| {
-        AppError::Provider(format!("failed to decode OpenRouter response: {err}"))
+    let status = response.status();
+    let body = response
+        .into_string()
+        .map_err(|error| map_success_body_read_error(status, error))?;
+    let parsed: ChatResponse = serde_json::from_str(&body).map_err(|error| {
+        AppError::Provider(format!(
+            "OpenRouter returned HTTP {status}, but the response body was not valid JSON: {error}. Body preview: {}",
+            preview_body(&body)
+        ))
     })?;
     let choice = parsed.choices.into_iter().next().ok_or_else(|| {
         AppError::Provider("OpenRouter response did not contain any choices".to_string())
@@ -257,6 +274,32 @@ fn extract_error_message(body: &str) -> Option<String> {
         .ok()
         .and_then(|response| response.error)
         .and_then(|error| error.message)
+}
+
+fn map_success_body_read_error(status: u16, error: io::Error) -> AppError {
+    match error.kind() {
+        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock => AppError::Timeout(format!(
+            "OpenRouter returned HTTP {status}, but reading the response body timed out: {error}"
+        )),
+        _ => AppError::Provider(format!(
+            "OpenRouter returned HTTP {status}, but the response body could not be fully read: {error}"
+        )),
+    }
+}
+
+fn preview_body(body: &str) -> String {
+    let compact = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.is_empty() {
+        return "(empty response body)".to_string();
+    }
+
+    let mut preview = compact.chars();
+    let snippet: String = preview.by_ref().take(200).collect();
+    if preview.next().is_some() {
+        format!("{snippet}...")
+    } else {
+        snippet
+    }
 }
 
 #[derive(Debug, Deserialize)]

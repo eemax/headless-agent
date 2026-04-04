@@ -183,7 +183,10 @@ mod tests {
     fn assemble_prompt_combines_agent_and_role_into_one_system_message() {
         let prompt = assemble_prompt(
             &loaded_agent(vec!["web_search".to_string(), "web_fetch".to_string()]),
-            Some(&loaded_role(Some("auditor system"), Some("role user prefix"))),
+            Some(&loaded_role(
+                Some("auditor system"),
+                Some("role user prefix"),
+            )),
             true,
             &[],
             "find docs",
@@ -192,7 +195,10 @@ mod tests {
         .expect("prompt assembly");
 
         assert_eq!(prompt.messages.len(), 2);
-        assert_eq!(prompt.messages[0].content.as_deref(), Some("base prompt\n\nauditor system"));
+        assert_eq!(
+            prompt.messages[0].content.as_deref(),
+            Some("base prompt\n\nauditor system")
+        );
         assert_eq!(
             prompt.messages[1].content.as_deref(),
             Some("role user prefix\nfind docs")
@@ -204,7 +210,10 @@ mod tests {
     fn assemble_prompt_applies_role_user_prefix_only_when_requested() {
         let prompt = assemble_prompt(
             &loaded_agent(vec!["bash".to_string()]),
-            Some(&loaded_role(Some("auditor system"), Some("role user prefix"))),
+            Some(&loaded_role(
+                Some("auditor system"),
+                Some("role user prefix"),
+            )),
             false,
             &[],
             "find docs",
@@ -212,7 +221,10 @@ mod tests {
         )
         .expect("prompt assembly");
 
-        assert_eq!(prompt.messages[0].content.as_deref(), Some("base prompt\n\nauditor system"));
+        assert_eq!(
+            prompt.messages[0].content.as_deref(),
+            Some("base prompt\n\nauditor system")
+        );
         assert_eq!(prompt.messages[1].content.as_deref(), Some("find docs"));
         assert_eq!(prompt.current_user_prompt, "find docs");
     }

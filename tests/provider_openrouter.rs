@@ -1,6 +1,12 @@
 mod common;
 
-use std::{env, time::Duration};
+use std::{
+    env,
+    io::{BufRead, BufReader, Read, Write},
+    net::TcpListener,
+    thread,
+    time::Duration,
+};
 
 use serde_json::json;
 
@@ -172,6 +178,75 @@ fn malformed_tool_arguments_fall_back_to_raw_string() {
     assert_eq!(response.tool_calls.len(), 1);
     assert_eq!(response.tool_calls[0].name, "bash");
     assert_eq!(response.tool_calls[0].arguments, json!("not json"));
+}
+
+#[test]
+fn interrupted_success_body_maps_to_provider_read_error() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+    let url = format!("http://{}", listener.local_addr().expect("local addr"));
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept connection");
+        let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+        let mut content_length = 0usize;
+        loop {
+            let mut line = String::new();
+            if reader.read_line(&mut line).expect("read header line") == 0 {
+                break;
+            }
+            if line == "\r\n" {
+                break;
+            }
+            if let Some(value) = line.strip_prefix("Content-Length:") {
+                content_length = value.trim().parse().expect("content length");
+            }
+        }
+
+        let mut body = vec![0; content_length];
+        reader.read_exact(&mut body).expect("read body");
+
+        let partial_body = "{\"choices\":[{\"message\":{\"content\":\"ok\"}}";
+        let advertised_length = partial_body.len() + 32;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            advertised_length, partial_body
+        );
+        stream
+            .write_all(response.as_bytes())
+            .expect("write truncated response");
+    });
+
+    let client = OpenRouterClient::new(url, "test-key".to_string());
+    let error = client
+        .send_chat(ChatRequest {
+            session_id: "session-1",
+            model: "openai/gpt-4.1",
+            effort: Effort::Medium,
+            messages: &[PromptMessage {
+                role: MessageRole::User,
+                content: Some("hello".to_string()),
+                name: None,
+                tool_call_id: None,
+                tool_calls: Vec::new(),
+            }],
+            tools: &[],
+            max_output_tokens: 128,
+            timeout: Duration::from_secs(5),
+        })
+        .expect_err("expected provider error");
+
+    match error {
+        AppError::Provider(message) => {
+            assert!(message.contains("HTTP 200"), "{message}");
+            assert!(
+                message.contains("response body could not be fully read"),
+                "{message}"
+            );
+            assert!(!message.contains("failed to decode"), "{message}");
+        }
+        other => panic!("expected provider error, got {other:?}"),
+    }
+
+    handle.join().expect("join server");
 }
 
 #[test]

@@ -165,7 +165,10 @@ pub(super) fn strip_outer_blank_lines(input: &str) -> String {
     lines[start..end].join("\n")
 }
 
-fn collect_blocks_from_children(container: ElementRef<'_>, context: RenderContext<'_>) -> Vec<HtmlBlock> {
+fn collect_blocks_from_children(
+    container: ElementRef<'_>,
+    context: RenderContext<'_>,
+) -> Vec<HtmlBlock> {
     let mut blocks = Vec::new();
     let mut pending_inline = Vec::new();
 
@@ -762,7 +765,10 @@ fn collect_table_blocks(table: &ElementRef<'_>, context: RenderContext<'_>) -> V
     }]
 }
 
-fn collect_table_rows(table: &ElementRef<'_>, context: RenderContext<'_>) -> Option<Vec<HtmlTableRow>> {
+fn collect_table_rows(
+    table: &ElementRef<'_>,
+    context: RenderContext<'_>,
+) -> Option<Vec<HtmlTableRow>> {
     let mut rows = Vec::new();
 
     for child in table.child_elements() {

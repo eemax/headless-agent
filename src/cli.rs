@@ -2,11 +2,7 @@ use std::{env, ffi::OsString, path::PathBuf};
 
 use lexopt::Parser;
 
-use crate::{
-    error::AppError,
-    tools::web_search,
-    types::Effort,
-};
+use crate::{error::AppError, tools::web_search, types::Effort};
 
 const USAGE: &str = "usage:
   headless version
@@ -136,10 +132,8 @@ fn parse_websearch(args: &[OsString]) -> Result<Command, AppError> {
                 let parsed = raw.parse::<usize>().map_err(|_| {
                     AppError::Usage(format!("invalid `--num_results` value `{raw}`\n\n{USAGE}"))
                 })?;
-                let validated =
-                    web_search::validate_num_results(Some(parsed as u64)).map_err(|error| {
-                        AppError::Usage(format!("{error}\n\n{USAGE}"))
-                    })?;
+                let validated = web_search::validate_num_results(Some(parsed as u64))
+                    .map_err(|error| AppError::Usage(format!("{error}\n\n{USAGE}")))?;
                 num_results = Some(validated);
             }
             lexopt::Arg::Long("published_within_days") => {
@@ -363,8 +357,8 @@ mod tests {
 
     #[test]
     fn websearch_rejects_invalid_type() {
-        let error = parse_from_args(["websearch", "--type", "keyword", "rust"])
-            .expect_err("invalid type");
+        let error =
+            parse_from_args(["websearch", "--type", "keyword", "rust"]).expect_err("invalid type");
         match error {
             AppError::Usage(message) => assert!(message.contains("invalid `--type` value")),
             other => panic!("unexpected error: {other}"),

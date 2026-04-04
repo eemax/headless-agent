@@ -81,9 +81,12 @@ pub(super) fn extract(source_url: Option<&str>, document: &Html) -> Option<SiteE
         GithubRoute::Releases | GithubRoute::ReleaseLatest => {
             extract_release(document, selectors, &parsed_url, ReleaseScope::FirstSection)
         }
-        GithubRoute::ReleaseTag => {
-            extract_release(document, selectors, &parsed_url, ReleaseScope::WholeDocument)
-        }
+        GithubRoute::ReleaseTag => extract_release(
+            document,
+            selectors,
+            &parsed_url,
+            ReleaseScope::WholeDocument,
+        ),
     }
 }
 
@@ -114,7 +117,11 @@ fn extract_repo_overview(
     })
 }
 
-fn extract_tree(document: &Html, selectors: &Selectors, source_url: &Url) -> Option<SiteExtraction> {
+fn extract_tree(
+    document: &Html,
+    selectors: &Selectors,
+    source_url: &Url,
+) -> Option<SiteExtraction> {
     let payload = embedded_payload(document, selectors)?;
     let items = get_path(&payload, &["payload", "codeViewTreeRoute", "tree", "items"])
         .and_then(Value::as_array);
@@ -133,7 +140,11 @@ fn extract_tree(document: &Html, selectors: &Selectors, source_url: &Url) -> Opt
     })
 }
 
-fn extract_blob(document: &Html, selectors: &Selectors, source_url: &Url) -> Option<SiteExtraction> {
+fn extract_blob(
+    document: &Html,
+    selectors: &Selectors,
+    source_url: &Url,
+) -> Option<SiteExtraction> {
     let payload = embedded_payload(document, selectors)?;
     let rendered = get_path(&payload, &["payload", "codeViewBlobRoute", "richText"])
         .and_then(Value::as_str)
@@ -548,7 +559,9 @@ fn extract_timeline_entry(node: &Value, source_url: &Url) -> Option<DiscussionEn
         .get("isHidden")
         .and_then(Value::as_bool)
         .unwrap_or(false)
-        || node.get("minimizedReason").is_some_and(|value| !value.is_null())
+        || node
+            .get("minimizedReason")
+            .is_some_and(|value| !value.is_null())
     {
         return None;
     }
@@ -627,7 +640,10 @@ fn extract_pr_visible_discussion(
     selectors: &Selectors,
     source_url: &Url,
 ) -> Vec<DiscussionEntry> {
-    let main_body_id = document.select(&selectors.pr_body).next().map(|body| body.id());
+    let main_body_id = document
+        .select(&selectors.pr_body)
+        .next()
+        .map(|body| body.id());
     document
         .select(&selectors.pr_discussion_container)
         .filter(|container| {

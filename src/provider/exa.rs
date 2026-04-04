@@ -162,10 +162,8 @@ mod tests {
 
     #[test]
     fn search_request_sends_num_results_and_start_published_date() {
-        let (address, request, handle) = spawn_json_http_server(
-            "200 OK",
-            r#"{"results":[],"searchType":"auto"}"#,
-        );
+        let (address, request, handle) =
+            spawn_json_http_server("200 OK", r#"{"results":[],"searchType":"auto"}"#);
         let client = ExaClient::with_base_url(format!("http://{address}"), "test-key".to_string());
         let search = SearchRequest {
             query: "rust async runtimes".to_string(),

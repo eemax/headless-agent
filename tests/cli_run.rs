@@ -266,13 +266,7 @@ fn role_cannot_be_selected_more_than_once_per_session() {
 
     let second = workspace
         .command()
-        .args([
-            "--session",
-            &session_id,
-            "--role",
-            "auditor",
-            "should fail",
-        ])
+        .args(["--session", &session_id, "--role", "auditor", "should fail"])
         .output()
         .expect("second run");
     assert_eq!(second.status.code(), Some(4));

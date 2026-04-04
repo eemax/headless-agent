@@ -185,22 +185,24 @@ fn run_prompt(
     };
 
     let agent = LoadedAgent::load(&roots, &agent_name)?;
-    let (role_invoked_this_run, role_name) =
-        match (args.role.as_deref(), session_meta.initial_role.as_deref()) {
-            (Some(role_name), Some(bound_role)) if role_name == bound_role => {
-                return Err(AppError::Session(format!(
-                    "session `{session_id}` already has role `{bound_role}` active; `--role {role_name}` has no effect because roles can only be selected once per session"
-                )));
-            }
-            (Some(role_name), Some(bound_role)) => {
-                return Err(AppError::Session(format!(
-                    "session `{session_id}` already has role `{bound_role}`; roles can only be selected once per session, so `--role {role_name}` is not allowed"
-                )));
-            }
-            (Some(role_name), None) => (true, Some(role_name.to_string())),
-            (None, Some(bound_role)) => (false, Some(bound_role.to_string())),
-            (None, None) => (false, None),
-        };
+    let (role_invoked_this_run, role_name) = match (
+        args.role.as_deref(),
+        session_meta.initial_role.as_deref(),
+    ) {
+        (Some(role_name), Some(bound_role)) if role_name == bound_role => {
+            return Err(AppError::Session(format!(
+                "session `{session_id}` already has role `{bound_role}` active; `--role {role_name}` has no effect because roles can only be selected once per session"
+            )));
+        }
+        (Some(role_name), Some(bound_role)) => {
+            return Err(AppError::Session(format!(
+                "session `{session_id}` already has role `{bound_role}`; roles can only be selected once per session, so `--role {role_name}` is not allowed"
+            )));
+        }
+        (Some(role_name), None) => (true, Some(role_name.to_string())),
+        (None, Some(bound_role)) => (false, Some(bound_role.to_string())),
+        (None, None) => (false, None),
+    };
     let role = role_name
         .as_ref()
         .map(|name| LoadedRole::load(&roots, name))
