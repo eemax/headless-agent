@@ -4,4 +4,5 @@ shell_args = ["-lc"]
 max_stdin_bytes = 1048576
 artifact_preview_bytes = 16384
 catastrophic_output_bytes = 16777216
+default_agent = "coder"
 api_key_env = "OPENROUTER_API_KEY"

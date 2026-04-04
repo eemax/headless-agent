@@ -55,11 +55,6 @@ impl SessionStore {
     pub fn create_session(&self) -> Result<SessionMeta, AppError> {
         self.ensure_root()?;
         let session_id = new_id();
-        let session_dir = self.session_dir(&session_id);
-        fs::create_dir_all(session_dir.join("runs"))?;
-        File::create(session_dir.join("messages.jsonl"))?;
-        File::create(session_dir.join("lock"))?;
-        File::create(session_dir.join("execution.lock"))?;
         let now = now_rfc3339()?;
         let meta = SessionMeta {
             session_id: session_id.clone(),
@@ -74,8 +69,57 @@ impl SessionStore {
             cwd: None,
             effort: None,
         };
-        self.write_meta(&meta)?;
+        self.initialize_session(&meta)?;
         Ok(meta)
+    }
+
+    pub fn fork_session(&self, source_session_id: &str) -> Result<SessionMeta, AppError> {
+        self.ensure_root()?;
+        let lock_path = self.session_dir(source_session_id).join("lock");
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .map_err(|error| match error.kind() {
+                io::ErrorKind::NotFound => {
+                    AppError::Session(format!("session `{source_session_id}` does not exist"))
+                }
+                _ => error.into(),
+            })?;
+        lock.lock_exclusive()?;
+
+        let snapshot = (|| -> Result<(SessionMeta, Vec<u8>), AppError> {
+            let meta = self.load_meta(source_session_id)?;
+            let messages = fs::read(self.session_dir(source_session_id).join("messages.jsonl"))?;
+            Ok((meta, messages))
+        })();
+
+        match snapshot {
+            Ok((source_meta, messages)) => {
+                lock.unlock()?;
+                let session_id = new_id();
+                let now = now_rfc3339()?;
+                let meta = SessionMeta {
+                    session_id: session_id.clone(),
+                    created_at: now.clone(),
+                    updated_at: now,
+                    stopped_at: None,
+                    revision: source_meta.revision,
+                    char_count: source_meta.char_count,
+                    agent_name: source_meta.agent_name,
+                    model: source_meta.model,
+                    initial_role: source_meta.initial_role,
+                    cwd: source_meta.cwd,
+                    effort: source_meta.effort,
+                };
+                self.initialize_session_with_messages(&meta, &messages)?;
+                Ok(meta)
+            }
+            Err(error) => {
+                let _ = lock.unlock();
+                Err(error)
+            }
+        }
     }
 
     pub fn list_sessions(&self) -> Result<Vec<SessionMeta>, AppError> {
@@ -249,6 +293,31 @@ impl SessionStore {
         Ok(())
     }
 
+    fn initialize_session(&self, meta: &SessionMeta) -> Result<(), AppError> {
+        self.initialize_session_with_messages(meta, b"")
+    }
+
+    fn initialize_session_with_messages(
+        &self,
+        meta: &SessionMeta,
+        messages: &[u8],
+    ) -> Result<(), AppError> {
+        let session_dir = self.session_dir(&meta.session_id);
+        let setup = (|| -> Result<(), AppError> {
+            fs::create_dir_all(session_dir.join("runs"))?;
+            fs::write(session_dir.join("messages.jsonl"), messages)?;
+            File::create(session_dir.join("lock"))?;
+            File::create(session_dir.join("execution.lock"))?;
+            self.write_meta(meta)?;
+            Ok(())
+        })();
+        if let Err(error) = setup {
+            let _ = fs::remove_dir_all(&session_dir);
+            return Err(error);
+        }
+        Ok(())
+    }
+
     fn open_execution_lock(&self, session_id: &str) -> Result<File, AppError> {
         let path = self.session_dir(session_id).join("execution.lock");
         Ok(OpenOptions::new()
@@ -354,10 +423,78 @@ mod tests {
             max_stdin_bytes: 1024,
             artifact_preview_bytes: 256,
             catastrophic_output_bytes: 4096,
+            default_agent: None,
             api_key: None,
             api_key_env: None,
             source_path: None,
         }
+    }
+
+    #[test]
+    fn fork_session_copies_persisted_state_and_reopens_the_branch() {
+        let temp = TempDir::new().expect("tempdir");
+        let config = test_config(temp.path());
+        let store = SessionStore::new(&config);
+        store.ensure_root().expect("ensure sessions");
+
+        let session = store.create_session().expect("create session");
+        let session_id = session.session_id.clone();
+        let record = test_record("run-1", "hello");
+        let commit = SessionCommit {
+            expected_revision: session.revision,
+            char_count_delta: record.char_count(),
+            records: vec![record],
+            bind_agent_name: Some("coder".to_string()),
+            bind_model: Some("model/one".to_string()),
+            bind_effort: Some(Effort::High),
+            bind_cwd: Some("/tmp/worktree".to_string()),
+            bind_initial_role: Some("auditor".to_string()),
+        };
+        store
+            .append_run(&session_id, commit, None)
+            .expect("append run");
+        store.stop_session(&session_id).expect("stop source");
+
+        let forked = store.fork_session(&session_id).expect("fork session");
+
+        assert_ne!(forked.session_id, session_id);
+        assert_eq!(forked.revision, 1);
+        assert_eq!(forked.char_count, 5);
+        assert_eq!(forked.agent_name.as_deref(), Some("coder"));
+        assert_eq!(forked.model.as_deref(), Some("model/one"));
+        assert_eq!(forked.effort, Some(Effort::High));
+        assert_eq!(forked.cwd.as_deref(), Some("/tmp/worktree"));
+        assert_eq!(forked.initial_role.as_deref(), Some("auditor"));
+        assert!(forked.stopped_at.is_none());
+        assert_eq!(
+            store
+                .load_messages(&forked.session_id)
+                .expect("forked messages")
+                .first()
+                .and_then(|record| record.content.as_deref()),
+            Some("hello")
+        );
+        assert!(
+            fs::read_dir(store.session_dir(&forked.session_id).join("runs"))
+                .expect("read forked runs")
+                .next()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn fork_missing_session_returns_session_error() {
+        let temp = TempDir::new().expect("tempdir");
+        let config = test_config(temp.path());
+        let store = SessionStore::new(&config);
+        store.ensure_root().expect("ensure sessions");
+
+        let error = store.fork_session("missing").expect_err("missing session");
+        assert!(matches!(error, AppError::Session(_)));
+        assert_eq!(
+            error.to_string(),
+            "session `missing` does not exist".to_string()
+        );
     }
 
     fn test_record(run_id: &str, content: &str) -> TranscriptRecord {

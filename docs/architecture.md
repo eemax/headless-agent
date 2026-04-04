@@ -82,10 +82,12 @@ Important behavior:
 - session ids and run ids are lowercase ULIDs
 - `headless session new` creates the session directory immediately
 - new sessions start unbound, with `agent_name`, `model`, `effort`, `cwd`, and `initial_role` set to `null`
+- unbound prompt runs may resolve the agent from `config.default_agent` when `--agent` is omitted
 - the first successful prompt run binds the session to an `agent_name` and stores sticky defaults for `model`, `effort`, `cwd`, and `initial_role`
 - later runs may override `--model`, `--effort`, and `--cwd` per invocation without mutating those stored defaults
 - `--plan` is per-invocation only and is not stored in `meta.json`
 - `session stop` marks the session as stopped, blocks new runs, and still allows already-started runs to finish, even if they reach their first mutating tool later
+- `--fork` snapshots a persisted session into a fresh active session by copying `meta.json` state and `messages.jsonl`, while starting with an empty `runs/` directory
 
 ## Session History Projection
 

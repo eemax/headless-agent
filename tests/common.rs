@@ -50,15 +50,25 @@ impl TestWorkspace {
     }
 
     pub fn write_repo_assets(&self, base_url: &str) {
-        self.write_root_assets(&self.repo_root, base_url, "repo coder", "2h");
+        self.write_root_assets(&self.repo_root, base_url, "repo coder", "2h", None);
     }
 
     pub fn write_home_assets(&self, base_url: &str) {
-        self.write_root_assets(&self.home_root, base_url, "home coder", "2h");
+        self.write_root_assets(&self.home_root, base_url, "home coder", "2h", None);
     }
 
     pub fn write_repo_assets_with_timeout(&self, base_url: &str, timeout: &str) {
-        self.write_root_assets(&self.repo_root, base_url, "repo coder", timeout);
+        self.write_root_assets(&self.repo_root, base_url, "repo coder", timeout, None);
+    }
+
+    pub fn write_repo_assets_with_default_agent(&self, base_url: &str, default_agent: &str) {
+        self.write_root_assets(
+            &self.repo_root,
+            base_url,
+            "repo coder",
+            "2h",
+            Some(default_agent),
+        );
     }
 
     pub fn write_named_agent(&self, root: &Path, name: &str, base_url: &str, prompt_label: &str) {
@@ -127,10 +137,20 @@ timeout = "{timeout}"
         entries.remove(0)
     }
 
-    fn write_root_assets(&self, root: &Path, base_url: &str, prompt_label: &str, timeout: &str) {
+    fn write_root_assets(
+        &self,
+        root: &Path,
+        base_url: &str,
+        prompt_label: &str,
+        timeout: &str,
+        default_agent: Option<&str>,
+    ) {
         fs::create_dir_all(root.join("agents")).expect("agents dir");
         fs::create_dir_all(root.join("roles")).expect("roles dir");
         fs::create_dir_all(root.join("prompts")).expect("prompts dir");
+        let default_agent_line = default_agent
+            .map(|value| format!("default_agent = \"{value}\"\n"))
+            .unwrap_or_default();
         fs::write(
             root.join("config.toml"),
             format!(
@@ -140,9 +160,11 @@ shell_args = ["-lc"]
 max_stdin_bytes = 1048576
 artifact_preview_bytes = 256
 catastrophic_output_bytes = 65536
+{}
 api_key_env = "OPENROUTER_API_KEY"
 "#,
-                self.sessions_dir.display()
+                self.sessions_dir.display(),
+                default_agent_line
             ),
         )
         .expect("write config");

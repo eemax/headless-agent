@@ -156,10 +156,17 @@ fn run_prompt(
             stderr.push(format!("created session {}", created.session_id));
             (created.clone(), created.session_id.clone(), true)
         }
-        SessionArg::Existing(id) => {
-            let meta = store.load_meta(id)?;
-            (meta, id.clone(), false)
-        }
+        SessionArg::Existing(id) => match args.fork {
+            true => {
+                let forked = store.fork_session(id)?;
+                stderr.push(format!("forked session {} from {}", forked.session_id, id));
+                (forked.clone(), forked.session_id.clone(), false)
+            }
+            false => {
+                let meta = store.load_meta(id)?;
+                (meta, id.clone(), false)
+            }
+        },
     };
 
     if session_meta.stopped_at.is_some() {
@@ -177,11 +184,12 @@ fn run_prompt(
         }
         (Some(agent), _) => agent.clone(),
         (None, Some(bound)) => bound.clone(),
-        (None, None) => {
-            return Err(AppError::Usage(
-                "this session is not yet bound; please provide --agent".to_string(),
-            ));
-        }
+        (None, None) => config.default_agent.clone().ok_or_else(|| {
+            AppError::Usage(
+                "this session is not yet bound; please provide --agent or set default_agent in config.toml"
+                    .to_string(),
+            )
+        })?,
     };
 
     let agent = LoadedAgent::load(&roots, &agent_name)?;

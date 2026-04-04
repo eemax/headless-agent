@@ -39,6 +39,7 @@ shell_args = ["-lc"]
 max_stdin_bytes = 1048576
 artifact_preview_bytes = 16384
 catastrophic_output_bytes = 16777216
+default_agent = "coder"
 api_key_env = "OPENROUTER_API_KEY"
 ```
 
@@ -74,6 +75,12 @@ api_key_env = "OPENROUTER_API_KEY"
 - Type: integer
 - Default: `16777216`
 - Purpose: emergency threshold for very large output; beyond this, inline assistant text is replaced with an artifact reference string
+
+`default_agent`
+- Type: string
+- Default: unset
+- Purpose: agent name to use for unbound prompt runs when `--agent` is omitted
+- Notes: once a run succeeds, the session binds to the chosen agent and later runs keep using that bound agent unless the same `--agent` is repeated explicitly
 
 `api_key`
 - Type: string

@@ -42,6 +42,7 @@ Root resolution
 
 Session identity
 - a session is bound to a single `agent_name` on the first successful prompt run
+- `config.default_agent` is only a fallback for unbound prompt runs; it does not override a bound session
 - later runs may override `--model`, `--effort`, and `--cwd` without mutating stored sticky defaults
 - `--plan` is per-run only and is never stored in session metadata
 

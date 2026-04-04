@@ -14,7 +14,7 @@ const USAGE: &str = "usage:
   headless session list
   headless session show <id>
   headless session stop <id>
-  headless --session <id|new> --agent <name> [--role <name>] [--model <name>] [--effort <none|minimal|low|medium|high|xhigh>] [--plan] [--cwd <path>] [--verbose] [--debug] \"prompt\"";
+  headless (--session <id|new> | --new) [--fork] [--agent <name>] [--role <name>] [--model <name>] [--effort <none|minimal|low|medium|high|xhigh>] [--plan] [--cwd <path>] [--verbose] [--debug] \"prompt\"";
 
 #[derive(Debug, Clone)]
 pub enum Command {
@@ -46,6 +46,7 @@ pub enum Command {
 #[derive(Debug, Clone)]
 pub struct RunArgs {
     pub session: SessionArg,
+    pub fork: bool,
     pub agent: Option<String>,
     pub role: Option<String>,
     pub model: Option<String>,
@@ -217,6 +218,7 @@ fn parse_session_subcommand(args: &[OsString]) -> Result<Command, AppError> {
 fn parse_run_args(args: Vec<OsString>) -> Result<Command, AppError> {
     let mut parser = Parser::from_args(args);
     let mut session = None;
+    let mut fork = false;
     let mut agent = None;
     let mut role = None;
     let mut model = None;
@@ -230,12 +232,31 @@ fn parse_run_args(args: Vec<OsString>) -> Result<Command, AppError> {
     while let Some(arg) = parser.next()? {
         match arg {
             lexopt::Arg::Long("session") => {
+                if session.is_some() {
+                    let message = if matches!(session, Some(SessionArg::New)) {
+                        "cannot combine --new with --session"
+                    } else {
+                        "session may only be selected once"
+                    };
+                    return Err(AppError::Usage(format!("{message}\n\n{USAGE}")));
+                }
                 let value = parser.value()?.to_string_lossy().to_string();
                 session = Some(if value == "new" {
                     SessionArg::New
                 } else {
                     SessionArg::Existing(value)
                 });
+            }
+            lexopt::Arg::Long("new") => {
+                if session.is_some() {
+                    return Err(AppError::Usage(format!(
+                        "cannot combine --new with --session\n\n{USAGE}"
+                    )));
+                }
+                session = Some(SessionArg::New);
+            }
+            lexopt::Arg::Long("fork") => {
+                fork = true;
             }
             lexopt::Arg::Long("agent") => {
                 agent = Some(parser.value()?.to_string_lossy().to_string());
@@ -275,17 +296,23 @@ fn parse_run_args(args: Vec<OsString>) -> Result<Command, AppError> {
         }
     }
 
-    let session =
-        session.ok_or_else(|| AppError::Usage(format!("missing --session\n\n{USAGE}")))?;
-    if matches!(session, SessionArg::New) && agent.is_none() {
-        return Err(AppError::Usage(
-            "new sessions require --agent when using the run command".to_string(),
-        ));
+    let session = session.ok_or_else(|| {
+        if fork {
+            AppError::Usage(format!("missing --session when using --fork\n\n{USAGE}"))
+        } else {
+            AppError::Usage(format!("missing --session\n\n{USAGE}"))
+        }
+    })?;
+    if fork && matches!(session, SessionArg::New) {
+        return Err(AppError::Usage(format!(
+            "--fork requires an existing session id\n\n{USAGE}"
+        )));
     }
     let prompt = prompt.ok_or_else(|| AppError::Usage(format!("missing prompt\n\n{USAGE}")))?;
 
     Ok(Command::Run(RunArgs {
         session,
+        fork,
         agent,
         role,
         model,
@@ -302,7 +329,91 @@ fn parse_run_args(args: Vec<OsString>) -> Result<Command, AppError> {
 mod tests {
     use crate::error::AppError;
 
-    use super::{Command, parse_from_args};
+    use super::{Command, RunArgs, SessionArg, parse_from_args};
+
+    #[test]
+    fn run_parses_new_alias() {
+        let command = parse_from_args(["--new", "hello"]).expect("parse run");
+
+        match command {
+            Command::Run(RunArgs {
+                session: SessionArg::New,
+                fork,
+                agent,
+                prompt,
+                ..
+            }) => {
+                assert!(!fork);
+                assert!(agent.is_none());
+                assert_eq!(prompt, "hello");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_parses_fork_on_existing_session() {
+        let command = parse_from_args(["--session", "abc123", "--fork", "continue"])
+            .expect("parse forked run");
+
+        match command {
+            Command::Run(RunArgs {
+                session: SessionArg::Existing(id),
+                fork,
+                prompt,
+                ..
+            }) => {
+                assert_eq!(id, "abc123");
+                assert!(fork);
+                assert_eq!(prompt, "continue");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_rejects_fork_without_session() {
+        let error = parse_from_args(["--fork", "hello"]).expect_err("missing session");
+        match error {
+            AppError::Usage(message) => {
+                assert!(message.contains("missing --session when using --fork"))
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
+    fn run_rejects_fork_with_new_alias() {
+        let error = parse_from_args(["--new", "--fork", "hello"]).expect_err("invalid fork");
+        match error {
+            AppError::Usage(message) => {
+                assert!(message.contains("--fork requires an existing session id"))
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
+    fn run_rejects_fork_with_session_new() {
+        let error =
+            parse_from_args(["--session", "new", "--fork", "hello"]).expect_err("invalid fork");
+        match error {
+            AppError::Usage(message) => {
+                assert!(message.contains("--fork requires an existing session id"))
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
+    fn run_rejects_combined_new_and_session() {
+        let error =
+            parse_from_args(["--new", "--session", "abc123", "hello"]).expect_err("duplicate");
+        match error {
+            AppError::Usage(message) => assert!(message.contains("cannot combine --new")),
+            other => panic!("unexpected error: {other}"),
+        }
+    }
 
     #[test]
     fn websearch_parses_query_and_flags() {
