@@ -914,8 +914,9 @@ fn simple_tables_render_as_markdown_and_complex_tables_fall_back_to_text() {
         </html>
         "#,
     );
-    assert!(complex.content.contains("A | B"));
-    assert!(complex.content.contains("C"));
+    assert!(complex.content.contains('A'));
+    assert!(complex.content.contains('B'));
+    assert!(complex.content.contains('C'));
     assert!(!complex.content.contains("| --- |"));
 }
 

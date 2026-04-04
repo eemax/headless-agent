@@ -37,6 +37,7 @@ The tool lives under [`src/tools/web_fetch/`](../src/tools/web_fetch/).
 - [`src/tools/web_fetch/tests.rs`](../src/tools/web_fetch/tests.rs): main offline test corpus plus live canary runner
 - [`src/tools/web_fetch/live_canaries.rs`](../src/tools/web_fetch/live_canaries.rs): live-canary manifest loader and tier helpers
 - [`src/tools/web_fetch/fixtures/`](../src/tools/web_fetch/fixtures/): real-page fixtures and live canary manifest
+- [`scripts/bench_webfetch.sh`](../scripts/bench_webfetch.sh): manual live benchmark comparing headless vs defuddle vs curl
 
 Integration points outside the module:
 
@@ -757,6 +758,46 @@ The self-hosted tier is especially useful for cases that are awkward to guarante
 - XML feeds
 - intentionally truncated large responses
 
+## Comparative Benchmark
+
+The live canaries above verify that our extraction meets absolute quality bars (markers present, min content chars, correct warnings). They do not tell us how we compare against other extraction tools on the same pages.
+
+[`scripts/bench_webfetch.sh`](../scripts/bench_webfetch.sh) fills that gap. It fetches a set of diverse URLs with three tools in parallel — headless, [defuddle](https://github.com/nichochar/defuddle) (`npm i -g defuddle-cli`), and raw curl — and checks:
+
+1. **Content produced** — headless returned non-empty content
+2. **Size parity with defuddle** — headless is at least 60% the size (not drastically worse)
+3. **Minimum content chars** — extracted body meets a per-case threshold
+4. **No content duplication** — unique long lines (40+ chars) are ≥75% of total
+5. **Required markers** — key phrases appear in the output
+
+### Running
+
+```bash
+./scripts/bench_webfetch.sh                           # all cases
+./scripts/bench_webfetch.sh paulgraham_greatwork       # single case
+HEADLESS=./target/debug/headless ./scripts/bench_webfetch.sh   # custom binary
+```
+
+Raw outputs for each tool are saved to `$BENCH_WEBFETCH_OUTDIR` (default `/tmp/bench_webfetch/`) for manual inspection after the run.
+
+### Adding cases
+
+Append to the `CASES` array in the script. Each entry is pipe-delimited:
+
+```
+"case_id|url|min_chars|required marker 1|required marker 2|..."
+```
+
+Good candidates for new cases are pages that:
+
+- use layout tables or unusual DOM structures (the class of bug this benchmark was created to catch)
+- are representative of a site category we care about (docs, blogs, academic, link aggregators)
+- have stable content that won't rot the required markers quickly
+
+### When to run
+
+Run after any change to root selection, table rendering, or the block collector in `render.rs` or `html.rs`. It is not part of CI — it hits live URLs, depends on defuddle being installed, and takes ~30 seconds. Treat it the same way you treat the live canaries: a manual check before merging extraction changes.
+
 ## Maintenance Notes
 
 ### If you change fetch safety behavior
@@ -779,6 +820,8 @@ Re-run and review tests covering:
 - fixture-based GitHub extraction
 
 Those areas are tightly coupled. Small heuristic changes can easily move a page from `HtmlPrimary` to `HtmlFallback`, add/remove warnings, or change whether content is truncated.
+
+Also run `./scripts/bench_webfetch.sh` to verify extraction quality hasn't regressed against defuddle on real pages.
 
 ### If you add a new site extractor
 

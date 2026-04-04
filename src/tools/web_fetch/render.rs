@@ -813,22 +813,7 @@ fn collect_table_row(
 }
 
 fn fallback_table_blocks(table: &ElementRef<'_>, context: RenderContext<'_>) -> Vec<HtmlBlock> {
-    let mut blocks = Vec::new();
-    for row in table
-        .descendent_elements()
-        .filter(|row| row.value().name() == "tr")
-    {
-        let cells = row
-            .child_elements()
-            .filter(|cell| matches!(cell.value().name(), "td" | "th"))
-            .map(|cell| render_inline_content(&cell, context))
-            .filter(|value| !value.is_empty())
-            .collect::<Vec<_>>();
-        if !cells.is_empty() {
-            blocks.push(HtmlBlock::Paragraph(cells.join(" | ")));
-        }
-    }
-    blocks
+    collect_blocks_from_children(*table, context)
 }
 
 fn suppress_duplicate_title_heading(blocks: &mut Vec<HtmlBlock>, title: &str) {
