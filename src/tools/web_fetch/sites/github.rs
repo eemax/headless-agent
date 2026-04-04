@@ -570,7 +570,7 @@ fn extract_timeline_entry(node: &Value, source_url: &Url) -> Option<DiscussionEn
     })
 }
 
-fn connection_nodes<'a>(value: &'a Value) -> Vec<&'a Value> {
+fn connection_nodes(value: &Value) -> Vec<&Value> {
     if let Some(nodes) = value.get("nodes").and_then(Value::as_array) {
         return nodes.iter().collect();
     }

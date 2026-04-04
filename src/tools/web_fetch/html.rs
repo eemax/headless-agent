@@ -17,10 +17,14 @@ use super::{
 static SELECTORS: OnceLock<Result<Selectors, String>> = OnceLock::new();
 const MAX_SHELL_MARKER_SCAN_BYTES: usize = 64 * 1024;
 const NAV_HEADING_PHRASES: &[&str] = &[
-    "related",
-    "recommended",
-    "popular",
-    "trending",
+    "related articles",
+    "related posts",
+    "related stories",
+    "recommended articles",
+    "recommended reading",
+    "popular articles",
+    "popular posts",
+    "trending stories",
     "more articles",
     "more stories",
     "you may also like",
@@ -619,12 +623,8 @@ fn evaluate_root_candidate<'a>(
             "pre" => code_block_count += 1,
             "table" => table_count += 1,
             "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
-                let heading_text =
-                    normalize_inline(&element.text().collect::<String>()).to_ascii_lowercase();
-                if NAV_HEADING_PHRASES
-                    .iter()
-                    .any(|phrase| heading_text.contains(phrase))
-                {
+                let heading_text = normalize_inline(&element.text().collect::<String>());
+                if heading_matches_nav_phrase(&heading_text) {
                     nav_heading_count += 1;
                 }
             }
@@ -639,10 +639,12 @@ fn evaluate_root_candidate<'a>(
     let comma_count = rendered.text.chars().filter(|&ch| ch == ',').count() as f64;
     let link_density = (link_text_len as f64 / visible_len).clamp(0.0, 1.0);
     let noise_penalty = noisy_token_penalty(root.element);
-    let body_penalty = matches!(root.source, RootSource::Body)
-        .then_some(120.0)
-        .unwrap_or(0.0);
-    let low_signal_penalty = low_signal.then_some(140.0).unwrap_or(0.0);
+    let body_penalty = if matches!(root.source, RootSource::Body) {
+        120.0
+    } else {
+        0.0
+    };
+    let low_signal_penalty = if low_signal { 140.0 } else { 0.0 };
     let nav_heading_penalty = nav_heading_count as f64 * 90.0;
     let content_score = visible_len
         + (paragraph_count as f64 * 18.0)
@@ -712,16 +714,40 @@ fn is_same_or_ancestor(ancestor: ElementRef<'_>, descendant: ElementRef<'_>) -> 
 fn noisy_token_penalty(element: ElementRef<'_>) -> f64 {
     let mut penalty = 0.0;
     for attr in ["class", "id"] {
-        if let Some(value) = element.value().attr(attr) {
-            let lowered = value.to_ascii_lowercase();
-            for needle in super::NOISY_TOKEN_SUBSTRINGS {
-                if lowered.contains(needle) {
-                    penalty += 35.0;
-                }
-            }
+        if let Some(value) = element.value().attr(attr)
+            && super::has_noisy_attribute_token(value)
+        {
+            penalty += 35.0;
         }
     }
     penalty
+}
+
+fn heading_matches_nav_phrase(heading_text: &str) -> bool {
+    let heading_tokens = ascii_word_tokens(heading_text);
+    if heading_tokens.is_empty() {
+        return false;
+    }
+
+    NAV_HEADING_PHRASES.iter().any(|phrase| {
+        let phrase_tokens = ascii_word_tokens(phrase);
+        !phrase_tokens.is_empty()
+            && phrase_tokens.len() <= heading_tokens.len()
+            && heading_tokens.windows(phrase_tokens.len()).any(|window| {
+                window
+                    .iter()
+                    .zip(&phrase_tokens)
+                    .all(|(heading_token, phrase_token)| heading_token == phrase_token)
+            })
+    })
+}
+
+fn ascii_word_tokens(input: &str) -> Vec<String> {
+    input
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .map(|token| token.to_ascii_lowercase())
+        .collect()
 }
 
 fn selectors() -> Result<&'static Selectors, String> {
@@ -941,5 +967,28 @@ mod tests {
         "#;
 
         assert_eq!(noisy_penalty(html, ".newsletter-widget"), 35.0);
+    }
+
+    #[test]
+    fn compound_noisy_tokens_count_once_per_attribute() {
+        let html = r#"
+            <html>
+              <body>
+                <section class="login-form-banner">
+                  <p>Account onboarding steps.</p>
+                </section>
+              </body>
+            </html>
+        "#;
+
+        assert_eq!(noisy_penalty(html, "section"), 35.0);
+    }
+
+    #[test]
+    fn nav_heading_matching_requires_clear_recommendation_phrases() {
+        assert!(heading_matches_nav_phrase("Related Articles"));
+        assert!(heading_matches_nav_phrase("You may also like"));
+        assert!(!heading_matches_nav_phrase("Unrelated Work"));
+        assert!(!heading_matches_nav_phrase("Recommended Configuration"));
     }
 }

@@ -279,7 +279,7 @@ fn role_cannot_be_selected_more_than_once_per_session() {
     assert!(
         String::from_utf8(second.stderr)
             .expect("stderr")
-            .contains("roles can only be selected once per session")
+            .contains("already has role `auditor` active")
     );
     assert_eq!(server.requests().len(), 1);
 }

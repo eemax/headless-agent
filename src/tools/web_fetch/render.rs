@@ -1,7 +1,7 @@
 use scraper::{ElementRef, Html};
 use url::Url;
 
-use super::{NOISY_TAGS, NOISY_TOKEN_SUBSTRINGS, content::normalize_inline};
+use super::{NOISY_TAGS, content::normalize_inline, has_noisy_attribute_token};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum HtmlBlock {
@@ -1065,28 +1065,5 @@ fn style_hides_element(style: &str) -> bool {
                 | ("opacity", "0")
                 | ("opacity", "0!important")
         )
-    })
-}
-
-fn has_noisy_attribute_token(value: &str) -> bool {
-    value
-        .split(|ch: char| !ch.is_ascii_alphanumeric())
-        .filter(|token| !token.is_empty())
-        .any(token_matches_noisy_pattern)
-}
-
-fn token_matches_noisy_pattern(token: &str) -> bool {
-    let lower = token.to_ascii_lowercase();
-    NOISY_TOKEN_SUBSTRINGS.iter().any(|pattern| {
-        if lower == *pattern {
-            return true;
-        }
-
-        if *pattern == "share" {
-            return lower.len() > pattern.len() && lower.ends_with(pattern);
-        }
-
-        (lower.len() > pattern.len() && lower.starts_with(pattern))
-            || (lower.len() > pattern.len() && lower.ends_with(pattern))
     })
 }
