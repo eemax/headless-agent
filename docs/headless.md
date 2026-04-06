@@ -310,6 +310,11 @@ New sessions start with:
 
 On the first successful prompt run, those fields are bound from the effective runtime values and then reused as sticky defaults when later runs omit them. Plan mode is never stored in session metadata.
 
+Current session-selection shortcuts:
+- `headless new "prompt"` is shorthand for starting a run with `--session new`
+- `headless last "prompt"` is shorthand for starting a run with `--session last`
+- `headless session last` prints the most recently updated non-stopped session id with committed history
+
 ## First-Pass Limitations
 
 These config surfaces are intentionally not active yet:

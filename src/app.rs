@@ -113,6 +113,13 @@ pub fn run(command: Command, interrupted: Arc<AtomicBool>) -> Result<AppOutput, 
                 stderr: Vec::new(),
             })
         }
+        Command::SessionLast => {
+            let session = store.last_active_session()?;
+            Ok(AppOutput {
+                stdout: format!("{}\n", session.session_id),
+                stderr: Vec::new(),
+            })
+        }
         Command::SessionList => {
             let output = store
                 .list_sessions()?
@@ -155,6 +162,21 @@ fn run_prompt(
             let created = store.create_session()?;
             stderr.push(format!("created session {}", created.session_id));
             (created.clone(), created.session_id.clone(), true)
+        }
+        SessionArg::Last => {
+            let resolved = store.last_active_session()?;
+            let resolved_id = resolved.session_id.clone();
+            match args.fork {
+                true => {
+                    let forked = store.fork_session(&resolved_id)?;
+                    stderr.push(format!(
+                        "forked session {} from {}",
+                        forked.session_id, resolved_id
+                    ));
+                    (forked.clone(), forked.session_id.clone(), false)
+                }
+                false => (resolved, resolved_id, false),
+            }
         }
         SessionArg::Existing(id) => match args.fork {
             true => {

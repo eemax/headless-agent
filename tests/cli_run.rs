@@ -90,7 +90,7 @@ fn new_session_uses_config_default_agent_when_agent_is_omitted() {
 }
 
 #[test]
-fn new_alias_matches_session_new_behavior() {
+fn new_command_matches_session_new_behavior() {
     let server = FakeOpenRouter::start(vec![ResponseSpec::json(json!({
         "choices": [
             {
@@ -105,7 +105,7 @@ fn new_alias_matches_session_new_behavior() {
 
     let output = workspace
         .command()
-        .args(["--new", "hello"])
+        .args(["new", "hello"])
         .output()
         .expect("run output");
 
@@ -227,7 +227,7 @@ fn bound_sessions_still_reject_mismatched_explicit_agent() {
 
     let first = workspace
         .command()
-        .args(["--new", "hello"])
+        .args(["new", "hello"])
         .output()
         .expect("first run");
     assert!(first.status.success());
@@ -326,7 +326,7 @@ fn fork_creates_branch_session_and_preserves_source_session() {
 
     let first = workspace
         .command()
-        .args(["--new", "first prompt"])
+        .args(["new", "first prompt"])
         .output()
         .expect("first run");
     assert!(first.status.success());
@@ -417,7 +417,7 @@ fn forking_a_stopped_session_creates_an_active_branch() {
 
     let first = workspace
         .command()
-        .args(["--new", "first prompt"])
+        .args(["new", "first prompt"])
         .output()
         .expect("first run");
     assert!(first.status.success());
@@ -459,6 +459,219 @@ fn forking_a_stopped_session_creates_an_active_branch() {
         .expect("fork show");
     let fork_meta: Value = serde_json::from_slice(&fork_meta_output.stdout).expect("meta");
     assert!(fork_meta["stopped_at"].is_null());
+}
+
+#[test]
+fn last_command_resumes_the_most_recent_active_committed_session() {
+    let server = FakeOpenRouter::start(vec![
+        ResponseSpec::json(json!({ "choices": [{ "message": { "content": "first answer" } }] })),
+        ResponseSpec::json(json!({ "choices": [{ "message": { "content": "second answer" } }] })),
+        ResponseSpec::json(
+            json!({ "choices": [{ "message": { "content": "continued answer" } }] }),
+        ),
+    ]);
+    let workspace = TestWorkspace::new();
+    workspace.write_repo_assets_with_default_agent(&server.url(), "coder");
+
+    let first = workspace
+        .command()
+        .args(["new", "first prompt"])
+        .output()
+        .expect("first run");
+    assert!(first.status.success());
+    let first_id = extract_created_session_id(&String::from_utf8(first.stderr).expect("stderr"));
+
+    let second = workspace
+        .command()
+        .args(["new", "second prompt"])
+        .output()
+        .expect("second run");
+    assert!(second.status.success());
+    let second_id = extract_created_session_id(&String::from_utf8(second.stderr).expect("stderr"));
+
+    let resumed = workspace
+        .command()
+        .args(["last", "continue"])
+        .output()
+        .expect("resume run");
+    assert!(resumed.status.success());
+    assert_eq!(
+        String::from_utf8(resumed.stdout).expect("stdout"),
+        "continued answer"
+    );
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[2]["messages"][1]["content"], "second prompt");
+    assert_eq!(requests[2]["messages"][2]["content"], "second answer");
+    assert_eq!(requests[2]["messages"][3]["content"], "continue");
+
+    let last_output = workspace
+        .command()
+        .args(["session", "last"])
+        .output()
+        .expect("session last");
+    assert!(last_output.status.success());
+    assert_eq!(
+        String::from_utf8(last_output.stdout).expect("stdout"),
+        format!("{second_id}\n")
+    );
+    assert!(
+        String::from_utf8(last_output.stderr)
+            .expect("stderr")
+            .is_empty()
+    );
+    assert_ne!(first_id, second_id);
+}
+
+#[test]
+fn session_last_ignores_empty_sessions() {
+    let server = FakeOpenRouter::start(vec![ResponseSpec::json(json!({
+        "choices": [
+            {
+                "message": {
+                    "content": "used session answer"
+                }
+            }
+        ]
+    }))]);
+    let workspace = TestWorkspace::new();
+    workspace.write_repo_assets_with_default_agent(&server.url(), "coder");
+
+    let used = workspace
+        .command()
+        .args(["new", "first prompt"])
+        .output()
+        .expect("used run");
+    assert!(used.status.success());
+    let used_id = extract_created_session_id(&String::from_utf8(used.stderr).expect("stderr"));
+
+    let empty = workspace
+        .command()
+        .args(["session", "new"])
+        .output()
+        .expect("empty session");
+    assert!(empty.status.success());
+
+    workspace
+        .command()
+        .args(["session", "last"])
+        .assert()
+        .success()
+        .stdout(format!("{used_id}\n"));
+}
+
+#[test]
+fn session_selector_last_matches_last_command() {
+    let server = FakeOpenRouter::start(vec![
+        ResponseSpec::json(json!({ "choices": [{ "message": { "content": "first answer" } }] })),
+        ResponseSpec::json(
+            json!({ "choices": [{ "message": { "content": "continued answer" } }] }),
+        ),
+        ResponseSpec::json(json!({ "choices": [{ "message": { "content": "continued again" } }] })),
+    ]);
+    let workspace = TestWorkspace::new();
+    workspace.write_repo_assets_with_default_agent(&server.url(), "coder");
+
+    let created = workspace
+        .command()
+        .args(["new", "first prompt"])
+        .output()
+        .expect("create session");
+    assert!(created.status.success());
+
+    let via_selector = workspace
+        .command()
+        .args(["--session", "last", "continue from selector"])
+        .output()
+        .expect("selector run");
+    assert!(via_selector.status.success());
+    assert_eq!(
+        String::from_utf8(via_selector.stdout).expect("stdout"),
+        "continued answer"
+    );
+
+    let via_command = workspace
+        .command()
+        .args(["last", "continue from command"])
+        .output()
+        .expect("command run");
+    assert!(via_command.status.success());
+    assert_eq!(
+        String::from_utf8(via_command.stdout).expect("stdout"),
+        "continued again"
+    );
+
+    let requests = server.requests();
+    assert_eq!(
+        requests[1]["messages"][3]["content"],
+        "continue from selector"
+    );
+    assert_eq!(
+        requests[2]["messages"][5]["content"],
+        "continue from command"
+    );
+}
+
+#[test]
+fn last_command_can_fork_the_resolved_recent_session() {
+    let server = FakeOpenRouter::start(vec![
+        ResponseSpec::json(json!({ "choices": [{ "message": { "content": "first answer" } }] })),
+        ResponseSpec::json(json!({ "choices": [{ "message": { "content": "forked answer" } }] })),
+    ]);
+    let workspace = TestWorkspace::new();
+    workspace.write_repo_assets_with_default_agent(&server.url(), "coder");
+
+    let created = workspace
+        .command()
+        .args(["new", "first prompt"])
+        .output()
+        .expect("create session");
+    assert!(created.status.success());
+    let source_id = extract_created_session_id(&String::from_utf8(created.stderr).expect("stderr"));
+
+    let forked = workspace
+        .command()
+        .args(["last", "--fork", "continue"])
+        .output()
+        .expect("forked run");
+    assert!(forked.status.success());
+    assert_eq!(
+        String::from_utf8(forked.stdout).expect("stdout"),
+        "forked answer"
+    );
+
+    let stderr = String::from_utf8(forked.stderr).expect("stderr");
+    let fork_id = stderr
+        .lines()
+        .find(|line| line.starts_with("forked session "))
+        .and_then(|line| line.split_whitespace().nth(2))
+        .expect("fork id")
+        .to_string();
+    assert_ne!(fork_id, source_id);
+    assert!(stderr.contains(&format!("from {source_id}")));
+}
+
+#[test]
+fn last_command_returns_session_error_when_no_active_committed_session_exists() {
+    let workspace = TestWorkspace::new();
+    workspace.write_repo_assets_with_default_agent("http://127.0.0.1:9", "coder");
+
+    workspace
+        .command()
+        .args(["session", "new"])
+        .assert()
+        .success();
+
+    workspace
+        .command()
+        .args(["last", "continue"])
+        .assert()
+        .failure()
+        .code(4)
+        .stderr(
+            "no active session with committed history was found; start one with `headless new`\n",
+        );
 }
 
 #[test]

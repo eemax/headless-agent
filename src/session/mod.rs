@@ -140,6 +140,34 @@ impl SessionStore {
         Ok(sessions)
     }
 
+    pub fn last_active_session(&self) -> Result<SessionMeta, AppError> {
+        let mut selected: Option<(OffsetDateTime, SessionMeta)> = None;
+        for meta in self.list_sessions()? {
+            if meta.stopped_at.is_some() || meta.revision == 0 {
+                continue;
+            }
+            let updated_at = OffsetDateTime::parse(&meta.updated_at, &Rfc3339)?;
+            let replace = match selected.as_ref() {
+                Some((best_updated_at, best_meta)) => {
+                    updated_at > *best_updated_at
+                        || (updated_at == *best_updated_at
+                            && meta.session_id > best_meta.session_id)
+                }
+                None => true,
+            };
+            if replace {
+                selected = Some((updated_at, meta));
+            }
+        }
+
+        selected.map(|(_, meta)| meta).ok_or_else(|| {
+            AppError::Session(
+                "no active session with committed history was found; start one with `headless new`"
+                    .to_string(),
+            )
+        })
+    }
+
     pub fn load_meta(&self, session_id: &str) -> Result<SessionMeta, AppError> {
         let path = self.session_dir(session_id).join("meta.json");
         if !path.exists() {
@@ -497,6 +525,92 @@ mod tests {
         );
     }
 
+    #[test]
+    fn last_active_session_prefers_newest_non_stopped_committed_session() {
+        let temp = TempDir::new().expect("tempdir");
+        let config = test_config(temp.path());
+        let store = SessionStore::new(&config);
+        store.ensure_root().expect("ensure sessions");
+
+        store
+            .initialize_session(&test_meta(
+                "empty",
+                "2024-01-02T00:00:00Z",
+                "2024-01-04T00:00:00Z",
+                0,
+                None,
+            ))
+            .expect("initialize empty session");
+        store
+            .initialize_session(&test_meta(
+                "stopped",
+                "2024-01-02T00:00:00Z",
+                "2024-01-05T00:00:00Z",
+                2,
+                Some("2024-01-05T00:00:01Z"),
+            ))
+            .expect("initialize stopped session");
+        store
+            .initialize_session(&test_meta(
+                "older-active",
+                "2024-01-02T00:00:00Z",
+                "2024-01-06T00:00:00Z",
+                1,
+                None,
+            ))
+            .expect("initialize older active session");
+        store
+            .initialize_session(&test_meta(
+                "newest-active",
+                "2024-01-02T00:00:00Z",
+                "2024-01-07T00:00:00Z",
+                3,
+                None,
+            ))
+            .expect("initialize newest active session");
+
+        let resolved = store
+            .last_active_session()
+            .expect("resolve newest active session");
+        assert_eq!(resolved.session_id, "newest-active");
+    }
+
+    #[test]
+    fn last_active_session_errors_when_no_active_committed_session_exists() {
+        let temp = TempDir::new().expect("tempdir");
+        let config = test_config(temp.path());
+        let store = SessionStore::new(&config);
+        store.ensure_root().expect("ensure sessions");
+
+        store
+            .initialize_session(&test_meta(
+                "empty",
+                "2024-01-02T00:00:00Z",
+                "2024-01-04T00:00:00Z",
+                0,
+                None,
+            ))
+            .expect("initialize empty session");
+        store
+            .initialize_session(&test_meta(
+                "stopped",
+                "2024-01-02T00:00:00Z",
+                "2024-01-05T00:00:00Z",
+                2,
+                Some("2024-01-05T00:00:01Z"),
+            ))
+            .expect("initialize stopped session");
+
+        let error = store
+            .last_active_session()
+            .expect_err("no qualifying sessions");
+        assert!(matches!(error, AppError::Session(_)));
+        assert_eq!(
+            error.to_string(),
+            "no active session with committed history was found; start one with `headless new`"
+        );
+    }
+
     fn test_record(run_id: &str, content: &str) -> TranscriptRecord {
         TranscriptRecord {
             v: 1,
@@ -509,6 +623,28 @@ mod tests {
             preview: None,
             artifact: None,
             tool_calls: None,
+        }
+    }
+
+    fn test_meta(
+        session_id: &str,
+        created_at: &str,
+        updated_at: &str,
+        revision: u64,
+        stopped_at: Option<&str>,
+    ) -> SessionMeta {
+        SessionMeta {
+            session_id: session_id.to_string(),
+            created_at: created_at.to_string(),
+            updated_at: updated_at.to_string(),
+            stopped_at: stopped_at.map(ToOwned::to_owned),
+            revision,
+            char_count: 0,
+            agent_name: Some("coder".to_string()),
+            model: Some("model/one".to_string()),
+            initial_role: None,
+            cwd: Some("/tmp/worktree".to_string()),
+            effort: Some(Effort::Medium),
         }
     }
 }

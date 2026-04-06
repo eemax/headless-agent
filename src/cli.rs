@@ -11,10 +11,13 @@ const USAGE: &str = "usage:
   headless agent list
   headless role list
   headless session new
+  headless session last
   headless session list
   headless session show <id>
   headless session stop <id>
-  headless (--session <id|new> | --new) [--fork] [--agent <name>] [--role <name>] [--model <name>] [--effort <none|minimal|low|medium|high|xhigh>] [--plan] [--cwd <path>] [--verbose] [--debug] \"prompt\"";
+  headless new [--agent <name>] [--role <name>] [--model <name>] [--effort <none|minimal|low|medium|high|xhigh>] [--plan] [--cwd <path>] [--verbose] [--debug] \"prompt\"
+  headless last [--fork] [--agent <name>] [--role <name>] [--model <name>] [--effort <none|minimal|low|medium|high|xhigh>] [--plan] [--cwd <path>] [--verbose] [--debug] \"prompt\"
+  headless --session <id|new|last> [--fork] [--agent <name>] [--role <name>] [--model <name>] [--effort <none|minimal|low|medium|high|xhigh>] [--plan] [--cwd <path>] [--verbose] [--debug] \"prompt\"";
 
 #[derive(Debug, Clone)]
 pub enum Command {
@@ -33,6 +36,7 @@ pub enum Command {
     AgentList,
     RoleList,
     SessionNew,
+    SessionLast,
     SessionList,
     SessionShow {
         id: String,
@@ -61,6 +65,7 @@ pub struct RunArgs {
 #[derive(Debug, Clone)]
 pub enum SessionArg {
     New,
+    Last,
     Existing(String),
 }
 
@@ -91,8 +96,10 @@ where
         Some("agent") => parse_simple_list("agent", &args, Command::AgentList),
         Some("role") => parse_simple_list("role", &args, Command::RoleList),
         Some("session") => parse_session_subcommand(&args),
+        Some("new") => parse_run_args(args.iter().skip(1).cloned(), Some(SessionArg::New)),
+        Some("last") => parse_run_args(args.iter().skip(1).cloned(), Some(SessionArg::Last)),
         Some("--help") | Some("-h") | Some("help") => Err(AppError::Usage(USAGE.to_string())),
-        _ => parse_run_args(args),
+        _ => parse_run_args(args, None),
     }
 }
 
@@ -202,6 +209,7 @@ fn parse_session_subcommand(args: &[OsString]) -> Result<Command, AppError> {
         args.len(),
     ) {
         (Some("new"), None, 2) => Ok(Command::SessionNew),
+        (Some("last"), None, 2) => Ok(Command::SessionLast),
         (Some("list"), None, 2) => Ok(Command::SessionList),
         (Some("show"), Some(id), 3) => Ok(Command::SessionShow {
             id: id.to_string_lossy().to_string(),
@@ -215,9 +223,13 @@ fn parse_session_subcommand(args: &[OsString]) -> Result<Command, AppError> {
     }
 }
 
-fn parse_run_args(args: Vec<OsString>) -> Result<Command, AppError> {
+fn parse_run_args<I>(args: I, implicit_session: Option<SessionArg>) -> Result<Command, AppError>
+where
+    I: IntoIterator,
+    I::Item: Into<OsString>,
+{
     let mut parser = Parser::from_args(args);
-    let mut session = None;
+    let mut session = implicit_session;
     let mut fork = false;
     let mut agent = None;
     let mut role = None;
@@ -233,27 +245,12 @@ fn parse_run_args(args: Vec<OsString>) -> Result<Command, AppError> {
         match arg {
             lexopt::Arg::Long("session") => {
                 if session.is_some() {
-                    let message = if matches!(session, Some(SessionArg::New)) {
-                        "cannot combine --new with --session"
-                    } else {
-                        "session may only be selected once"
-                    };
-                    return Err(AppError::Usage(format!("{message}\n\n{USAGE}")));
-                }
-                let value = parser.value()?.to_string_lossy().to_string();
-                session = Some(if value == "new" {
-                    SessionArg::New
-                } else {
-                    SessionArg::Existing(value)
-                });
-            }
-            lexopt::Arg::Long("new") => {
-                if session.is_some() {
                     return Err(AppError::Usage(format!(
-                        "cannot combine --new with --session\n\n{USAGE}"
+                        "session may only be selected once\n\n{USAGE}"
                     )));
                 }
-                session = Some(SessionArg::New);
+                let value = parser.value()?.to_string_lossy().to_string();
+                session = Some(parse_session_arg(&value));
             }
             lexopt::Arg::Long("fork") => {
                 fork = true;
@@ -305,7 +302,7 @@ fn parse_run_args(args: Vec<OsString>) -> Result<Command, AppError> {
     })?;
     if fork && matches!(session, SessionArg::New) {
         return Err(AppError::Usage(format!(
-            "--fork requires an existing session id\n\n{USAGE}"
+            "--fork requires an existing session id or `last`\n\n{USAGE}"
         )));
     }
     let prompt = prompt.ok_or_else(|| AppError::Usage(format!("missing prompt\n\n{USAGE}")))?;
@@ -325,15 +322,23 @@ fn parse_run_args(args: Vec<OsString>) -> Result<Command, AppError> {
     }))
 }
 
+fn parse_session_arg(value: &str) -> SessionArg {
+    match value {
+        "new" => SessionArg::New,
+        "last" => SessionArg::Last,
+        _ => SessionArg::Existing(value.to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::error::AppError;
 
-    use super::{Command, RunArgs, SessionArg, parse_from_args};
+    use super::{Command, RunArgs, SessionArg, USAGE, parse_from_args};
 
     #[test]
-    fn run_parses_new_alias() {
-        let command = parse_from_args(["--new", "hello"]).expect("parse run");
+    fn run_parses_new_command() {
+        let command = parse_from_args(["new", "hello"]).expect("parse run");
 
         match command {
             Command::Run(RunArgs {
@@ -346,6 +351,45 @@ mod tests {
                 assert!(!fork);
                 assert!(agent.is_none());
                 assert_eq!(prompt, "hello");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_parses_last_command() {
+        let command = parse_from_args(["last", "resume"]).expect("parse run");
+
+        match command {
+            Command::Run(RunArgs {
+                session: SessionArg::Last,
+                fork,
+                agent,
+                prompt,
+                ..
+            }) => {
+                assert!(!fork);
+                assert!(agent.is_none());
+                assert_eq!(prompt, "resume");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_parses_last_session_selector() {
+        let command =
+            parse_from_args(["--session", "last", "--fork", "resume"]).expect("parse run");
+
+        match command {
+            Command::Run(RunArgs {
+                session: SessionArg::Last,
+                fork,
+                prompt,
+                ..
+            }) => {
+                assert!(fork);
+                assert_eq!(prompt, "resume");
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -383,11 +427,11 @@ mod tests {
     }
 
     #[test]
-    fn run_rejects_fork_with_new_alias() {
-        let error = parse_from_args(["--new", "--fork", "hello"]).expect_err("invalid fork");
+    fn run_rejects_fork_with_new_command() {
+        let error = parse_from_args(["new", "--fork", "hello"]).expect_err("invalid fork");
         match error {
             AppError::Usage(message) => {
-                assert!(message.contains("--fork requires an existing session id"))
+                assert!(message.contains("--fork requires an existing session id or `last`"))
             }
             other => panic!("unexpected error: {other}"),
         }
@@ -399,18 +443,41 @@ mod tests {
             parse_from_args(["--session", "new", "--fork", "hello"]).expect_err("invalid fork");
         match error {
             AppError::Usage(message) => {
-                assert!(message.contains("--fork requires an existing session id"))
+                assert!(message.contains("--fork requires an existing session id or `last`"))
             }
             other => panic!("unexpected error: {other}"),
         }
     }
 
     #[test]
-    fn run_rejects_combined_new_and_session() {
-        let error =
-            parse_from_args(["--new", "--session", "abc123", "hello"]).expect_err("duplicate");
+    fn run_rejects_removed_new_flag() {
+        let error = parse_from_args(["--new", "hello"]).expect_err("removed flag");
         match error {
-            AppError::Usage(message) => assert!(message.contains("cannot combine --new")),
+            AppError::Usage(message) => assert_eq!(message, USAGE),
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
+    fn run_rejects_duplicate_session_selection_in_new_command() {
+        let error =
+            parse_from_args(["new", "--session", "abc123", "hello"]).expect_err("duplicate");
+        match error {
+            AppError::Usage(message) => {
+                assert!(message.contains("session may only be selected once"))
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
+    fn run_rejects_duplicate_session_selection_in_last_command() {
+        let error =
+            parse_from_args(["last", "--session", "abc123", "hello"]).expect_err("duplicate");
+        match error {
+            AppError::Usage(message) => {
+                assert!(message.contains("session may only be selected once"))
+            }
             other => panic!("unexpected error: {other}"),
         }
     }

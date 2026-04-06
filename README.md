@@ -7,8 +7,8 @@ This repo contains the first implementation pass: a Rust binary with durable ses
 ## Current Scope
 
 Implemented now:
-- CLI entrypoints for `version`, `agent list`, `role list`, and `session new|list|show|stop`
-- prompt runs with `--session` or `--new`, optional `--fork`, optional `--agent`, optional `--role`, `--model`, `--effort`, `--plan`, and `--cwd`
+- CLI entrypoints for `version`, `agent list`, `role list`, and `session new|last|list|show|stop`
+- prompt runs with `new`, `last`, or `--session <id|new|last>`, optional `--fork`, optional `--agent`, optional `--role`, `--model`, `--effort`, `--plan`, and `--cwd`
 - OpenRouter chat completions integration
 - session metadata and JSONL transcript persistence
 - optimistic same-session conflict detection plus a dedicated mutating-run execution lock
@@ -52,13 +52,19 @@ Run the default repo-shipped agent:
 ```bash
 export OPENROUTER_API_KEY=...
 export EXA_API_KEY=...
-cargo run -- --new "summarize this repo"
+cargo run -- new "summarize this repo"
+```
+
+Resume the most recent active session:
+
+```bash
+cargo run -- last "keep going"
 ```
 
 Run in plan mode:
 
 ```bash
-cargo run -- --new --plan "inspect the project and propose edits"
+cargo run -- new --plan "inspect the project and propose edits"
 ```
 
 In `--plan` mode, all built-in tools return planned actions instead of executing, including read-only tools. `--plan` is per-run only; it is not persisted in session metadata.
@@ -97,6 +103,8 @@ cargo build --release
 If you invoke `headless` inside another repo without `--cwd`, tool execution uses the shell's current working directory. Passing `--cwd` overrides that for the current run. On the first successful prompt run in a session, the effective cwd is stored as that session's sticky default and reused by later runs in the same session when `--cwd` is omitted.
 
 The starter `config.toml` also sets `default_agent = "coder"`, so unbound sessions resolve to the repo-shipped `coder` agent unless you explicitly pass `--agent`.
+
+For scripting and inspection, `headless session last` prints the resolved most recent active session id to stdout.
 
 ## Configuration Roots
 

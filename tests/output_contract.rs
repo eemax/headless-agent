@@ -28,6 +28,33 @@ fn session_new_prints_only_the_ulid_to_stdout() {
 }
 
 #[test]
+fn session_list_remains_lexicographically_sorted() {
+    let workspace = TestWorkspace::new();
+    workspace.write_repo_assets("http://127.0.0.1:9");
+
+    let first = workspace
+        .command()
+        .args(["session", "new"])
+        .output()
+        .expect("first session");
+    let first_id = String::from_utf8(first.stdout).expect("first stdout");
+
+    let second = workspace
+        .command()
+        .args(["session", "new"])
+        .output()
+        .expect("second session");
+    let second_id = String::from_utf8(second.stdout).expect("second stdout");
+
+    workspace
+        .command()
+        .args(["session", "list"])
+        .assert()
+        .success()
+        .stdout(format!("{}{}", first_id, second_id));
+}
+
+#[test]
 fn agent_and_role_list_are_resolved_from_repo_root() {
     let workspace = TestWorkspace::new();
     workspace.write_repo_assets("http://127.0.0.1:9");

@@ -81,6 +81,7 @@ Current on-disk layout:
 Important behavior:
 - session ids and run ids are lowercase ULIDs
 - `headless session new` creates the session directory immediately
+- `headless session last` prints the most recently updated non-stopped session id with committed history
 - new sessions start unbound, with `agent_name`, `model`, `effort`, `cwd`, and `initial_role` set to `null`
 - unbound prompt runs may resolve the agent from `config.default_agent` when `--agent` is omitted
 - the first successful prompt run binds the session to an `agent_name` and stores sticky defaults for `model`, `effort`, `cwd`, and `initial_role`
@@ -88,6 +89,7 @@ Important behavior:
 - `--plan` is per-invocation only and is not stored in `meta.json`
 - `session stop` marks the session as stopped, blocks new runs, and still allows already-started runs to finish, even if they reach their first mutating tool later
 - `--fork` snapshots a persisted session into a fresh active session by copying `meta.json` state and `messages.jsonl`, while starting with an empty `runs/` directory
+- `headless last` and `headless --session last` resolve using the same active committed-session rule as `headless session last`
 
 ## Session History Projection
 
@@ -189,10 +191,10 @@ Current behavior:
 ## Output Contract
 
 The stdout/stderr split is strict:
-- stdout is reserved for the final assistant text, or the new session id for `headless session new`
+- stdout is reserved for the final assistant text, the new session id for `headless session new`, or the resolved session id for `headless session last`
 - stderr is used for errors, validation failures, and optional verbose/debug metadata
 
-This is why run metadata such as the generated session id for `--session new` is reported on stderr, not stdout.
+This is why run metadata such as the generated session id for `headless new` or `--session new` is reported on stderr, not stdout.
 
 ## Known First-Pass Boundaries
 

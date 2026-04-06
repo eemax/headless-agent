@@ -167,7 +167,7 @@ For manual verification with a real key:
 
 ```bash
 export OPENROUTER_API_KEY=...
-cargo run -- --session new --agent coder "say hello"
+cargo run -- new "say hello"
 ```
 
 ## Docs To Keep In Sync
