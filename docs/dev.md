@@ -159,9 +159,20 @@ Do not paper over those gaps with hidden fallback behavior. It is better to fail
 
 ## Benchmarks And Manual Checks
 
-There is a lightweight benchmark helper at [scripts/bench.sh](../scripts/bench.sh).
+There are two manual benchmark helpers:
+- [scripts/bench.sh](../scripts/bench.sh) for a quick shell smoke check
+- [scripts/bench_perf.py](../scripts/bench_perf.py) for repeatable local performance measurements plus optional live `webfetch` comparisons
 
-Use it for quick operational smoke checks, not as a substitute for targeted tests.
+Use them for operational checks and before/after optimization comparisons, not as a substitute for targeted tests.
+
+Useful runs:
+
+```bash
+./scripts/bench_perf.py --quick
+./scripts/bench_perf.py
+./scripts/bench_perf.py --quick --live-webfetch
+./scripts/bench_perf.py --json > /tmp/headless-bench.json
+```
 
 For manual verification with a real key:
 

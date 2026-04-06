@@ -140,9 +140,37 @@ impl SessionStore {
         Ok(sessions)
     }
 
+    pub fn list_session_ids(&self) -> Result<Vec<String>, AppError> {
+        self.ensure_root()?;
+        let mut ids = Vec::new();
+        for entry in fs::read_dir(&self.sessions_dir)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            if !entry.path().join("meta.json").exists() {
+                continue;
+            }
+            ids.push(entry.file_name().to_string_lossy().to_string());
+        }
+        ids.sort();
+        Ok(ids)
+    }
+
     pub fn last_active_session(&self) -> Result<SessionMeta, AppError> {
         let mut selected: Option<(OffsetDateTime, SessionMeta)> = None;
-        for meta in self.list_sessions()? {
+        self.ensure_root()?;
+        for entry in fs::read_dir(&self.sessions_dir)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let meta_path = entry.path().join("meta.json");
+            if !meta_path.exists() {
+                continue;
+            }
+            let raw = fs::read_to_string(meta_path)?;
+            let meta: SessionMeta = serde_json::from_str(&raw)?;
             if meta.stopped_at.is_some() || meta.revision == 0 {
                 continue;
             }

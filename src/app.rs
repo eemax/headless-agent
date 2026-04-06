@@ -121,11 +121,7 @@ pub fn run(command: Command, interrupted: Arc<AtomicBool>) -> Result<AppOutput, 
             })
         }
         Command::SessionList => {
-            let output = store
-                .list_sessions()?
-                .into_iter()
-                .map(|session| session.session_id)
-                .collect::<Vec<_>>();
+            let output = store.list_session_ids()?;
             Ok(AppOutput {
                 stdout: format_lines(output),
                 stderr: Vec::new(),

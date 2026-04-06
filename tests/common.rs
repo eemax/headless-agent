@@ -335,6 +335,9 @@ impl Drop for FakeOpenRouter {
 }
 
 fn handle_connection(mut stream: TcpStream, spec: ResponseSpec, requests: &Arc<Mutex<Vec<Value>>>) {
+    stream
+        .set_nonblocking(false)
+        .expect("set accepted stream blocking");
     let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
     let mut content_length = 0usize;
     loop {

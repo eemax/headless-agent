@@ -15,6 +15,7 @@ const CONNECT_TIMEOUT_CAP: Duration = Duration::from_secs(30);
 pub struct OpenRouterClient {
     base_url: String,
     api_key: String,
+    agent: ureq::Agent,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -46,7 +47,14 @@ pub struct ChatRequest<'a> {
 
 impl OpenRouterClient {
     pub fn new(base_url: String, api_key: String) -> Self {
-        Self { base_url, api_key }
+        let agent = ureq::AgentBuilder::new()
+            .timeout_connect(CONNECT_TIMEOUT_CAP)
+            .build();
+        Self {
+            base_url,
+            api_key,
+            agent,
+        }
     }
 
     pub fn send_chat(&self, request: ChatRequest<'_>) -> Result<ProviderResponse, AppError> {
@@ -59,28 +67,22 @@ impl OpenRouterClient {
             request.tools,
             request.max_output_tokens,
         );
-        send_chat_blocking(url, self.api_key.clone(), payload, request.timeout)
+        send_chat_blocking(&self.agent, url, &self.api_key, payload, request.timeout)
     }
 }
 
 fn send_chat_blocking(
+    agent: &ureq::Agent,
     url: String,
-    api_key: String,
+    api_key: &str,
     payload: Value,
     timeout: Duration,
 ) -> Result<ProviderResponse, AppError> {
-    let connect_timeout = CONNECT_TIMEOUT_CAP.min(timeout);
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(connect_timeout)
-        .timeout(timeout)
-        .timeout_read(timeout)
-        .timeout_write(timeout)
-        .build();
-
     let response = agent
         .post(&url)
         .set("Authorization", &format!("Bearer {}", api_key))
         .set("Content-Type", "application/json")
+        .timeout(timeout)
         .send_json(payload);
 
     let response = match response {
