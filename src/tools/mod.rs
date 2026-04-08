@@ -301,17 +301,6 @@ pub fn tool_behavior(name: &str) -> Option<ToolBehavior> {
     }
 }
 
-pub const IGNORED_DIRS: &[&str] = &[
-    ".git",
-    "node_modules",
-    "target",
-    ".hg",
-    ".svn",
-    "__pycache__",
-    "dist",
-    "build",
-];
-
 pub fn resolve_path(cwd: &Path, value: &str) -> PathBuf {
     let path = PathBuf::from(value);
     if path.is_absolute() {

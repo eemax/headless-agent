@@ -12,15 +12,19 @@ use headless::{
 };
 
 #[test]
-fn glob_skips_ignored_directories() {
+fn glob_matches_hidden_files_but_skips_git() {
     let temp = TempDir::new().expect("tempdir");
     let cwd = temp.path();
     let run_dir = cwd.join("run");
     fs::create_dir_all(&run_dir).expect("run dir");
 
-    let target_dir = cwd.join("target").join("debug");
-    fs::create_dir_all(&target_dir).expect("target dir");
-    fs::write(target_dir.join("bin.txt"), "x").expect("target file");
+    let git_dir = cwd.join(".git");
+    fs::create_dir_all(&git_dir).expect(".git dir");
+    fs::write(git_dir.join("config.txt"), "x").expect(".git file");
+
+    let hidden_dir = cwd.join(".config");
+    fs::create_dir_all(&hidden_dir).expect(".config dir");
+    fs::write(hidden_dir.join("settings.txt"), "x").expect("hidden file");
 
     fs::write(cwd.join("src.txt"), "x").expect("src file");
 
@@ -44,8 +48,49 @@ fn glob_skips_ignored_directories() {
     .expect("glob execution");
     let payload: Value = serde_json::from_str(&execution.content).expect("json");
     let matches = payload["matches"].as_array().expect("matches array");
+    assert_eq!(matches.len(), 2);
+    assert_eq!(matches[0], ".config/settings.txt");
+    assert_eq!(matches[1], "src.txt");
+}
+
+#[test]
+fn glob_respects_ignore_files() {
+    let temp = TempDir::new().expect("tempdir");
+    let cwd = temp.path();
+    let run_dir = cwd.join("run");
+    fs::create_dir_all(&run_dir).expect("run dir");
+
+    fs::write(cwd.join(".ignore"), "generated/\n").expect(".ignore");
+    let generated_dir = cwd.join("generated");
+    fs::create_dir_all(&generated_dir).expect("generated dir");
+    fs::write(generated_dir.join("artifact.txt"), "x").expect("ignored file");
+
+    let included_dir = cwd.join("src");
+    fs::create_dir_all(&included_dir).expect("src dir");
+    fs::write(included_dir.join("main.txt"), "x").expect("src file");
+
+    let config = test_config(cwd);
+    let run_control = new_run_control(&config, Duration::from_secs(5));
+    let context = ToolContext::new(
+        cwd,
+        &run_dir,
+        &config,
+        false,
+        &config.shell,
+        &config.shell_args,
+        &run_control,
+    );
+    let execution = execute_tool(
+        &context,
+        &["glob".to_string()],
+        "glob",
+        &json!({ "pattern": "**/*.txt" }),
+    )
+    .expect("glob execution");
+    let payload: Value = serde_json::from_str(&execution.content).expect("json");
+    let matches = payload["matches"].as_array().expect("matches array");
     assert_eq!(matches.len(), 1);
-    assert_eq!(matches[0], "src.txt");
+    assert_eq!(matches[0], "src/main.txt");
 }
 
 #[test]
