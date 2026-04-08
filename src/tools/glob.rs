@@ -51,19 +51,19 @@ pub fn glob_search(context: &ToolContext<'_>, arguments: &Value) -> Result<Value
             "truncated": false,
         }));
     }
+    if !plan.match_relative_to_cwd && subtree_root_is_excluded(context.cwd, &plan.subtree_root) {
+        return Ok(json!({
+            "ok": true,
+            "matches": [],
+            "truncated": false,
+        }));
+    }
 
     let mut matches = Vec::new();
     let mut truncated = false;
     let subtree_root = plan.subtree_root.clone();
     let mut builder = WalkBuilder::new(&plan.walk_root);
-    builder.current_dir(context.cwd);
-    builder.hidden(false);
-    builder.parents(true);
-    builder.ignore(true);
-    builder.git_ignore(true);
-    builder.git_global(true);
-    builder.git_exclude(true);
-    builder.require_git(false);
+    configure_walk_builder(&mut builder, context.cwd);
     builder.max_depth(plan.max_depth);
     builder.sort_by_file_path(|left, right| left.cmp(right));
     builder.filter_entry(move |entry| should_visit_entry(entry, &subtree_root));
@@ -113,15 +113,22 @@ fn build_plan(cwd: &Path, pattern: &str) -> GlobPlan {
     };
     let subtree_root = search_root(&base_root, pattern_path);
     let remaining_components = remaining_components(pattern_path);
+    let walk_root = if match_relative_to_cwd {
+        base_root.clone()
+    } else {
+        subtree_root.clone()
+    };
     let max_depth = if pattern.contains("**") {
         None
-    } else {
+    } else if match_relative_to_cwd {
         Some(path_depth(&base_root, &subtree_root) + remaining_components)
+    } else {
+        Some(remaining_components)
     };
 
     GlobPlan {
         matcher_pattern: pattern.to_string(),
-        walk_root: base_root,
+        walk_root,
         subtree_root,
         match_relative_to_cwd,
         max_depth,
@@ -206,6 +213,17 @@ fn should_visit_entry(entry: &DirEntry, subtree_root: &Path) -> bool {
     !path_has_component(entry.path(), ".git") && is_in_subtree(entry.path(), subtree_root)
 }
 
+fn configure_walk_builder(builder: &mut WalkBuilder, cwd: &Path) {
+    builder.current_dir(cwd);
+    builder.hidden(false);
+    builder.parents(true);
+    builder.ignore(true);
+    builder.git_ignore(true);
+    builder.git_global(true);
+    builder.git_exclude(true);
+    builder.require_git(false);
+}
+
 fn normalize_pattern(pattern: &str) -> String {
     let pattern_path = Path::new(pattern);
     if pattern_path.is_absolute() {
@@ -232,6 +250,35 @@ fn normalize_pattern(pattern: &str) -> String {
 fn path_has_component(path: &Path, name: &str) -> bool {
     path.components()
         .any(|component| component.as_os_str() == name)
+}
+
+fn subtree_root_is_excluded(cwd: &Path, subtree_root: &Path) -> bool {
+    if path_has_component(subtree_root, ".git") {
+        return true;
+    }
+    let Some(parent) = subtree_root.parent() else {
+        return false;
+    };
+    if parent == subtree_root {
+        return false;
+    }
+
+    let target = subtree_root.to_path_buf();
+    let filter_target = target.clone();
+    let mut builder = WalkBuilder::new(parent);
+    configure_walk_builder(&mut builder, cwd);
+    builder.max_depth(Some(1));
+    builder.filter_entry(move |entry| filter_target.starts_with(entry.path()));
+
+    let mut saw_error = false;
+    for entry in builder.build() {
+        match entry {
+            Ok(entry) if entry.path() == target => return false,
+            Ok(_) => {}
+            Err(_) => saw_error = true,
+        }
+    }
+    !saw_error
 }
 
 fn is_in_subtree(path: &Path, subtree_root: &Path) -> bool {

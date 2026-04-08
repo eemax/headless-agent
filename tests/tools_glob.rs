@@ -231,6 +231,171 @@ fn glob_excludes_git_file_entries() {
 }
 
 #[test]
+fn glob_absolute_exact_file_patterns_match() {
+    let temp = TempDir::new().expect("tempdir");
+    let cwd = temp.path().join("repo");
+    fs::create_dir_all(&cwd).expect("cwd");
+    let run_dir = cwd.join("run");
+    fs::create_dir_all(&run_dir).expect("run dir");
+
+    let file = temp.path().join("outside.txt");
+    fs::write(&file, "x").expect("outside file");
+
+    let config = test_config(&cwd);
+    let run_control = new_run_control(&config, Duration::from_secs(5));
+    let context = ToolContext::new(
+        &cwd,
+        &run_dir,
+        &config,
+        false,
+        &config.shell,
+        &config.shell_args,
+        &run_control,
+    );
+    let execution = execute_tool(
+        &context,
+        &["glob".to_string()],
+        "glob",
+        &json!({ "pattern": file.display().to_string() }),
+    )
+    .expect("glob execution");
+    let payload: Value = serde_json::from_str(&execution.content).expect("json");
+    let matches = payload["matches"].as_array().expect("matches array");
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0], file.display().to_string());
+}
+
+#[test]
+fn glob_absolute_wildcard_patterns_match() {
+    let temp = TempDir::new().expect("tempdir");
+    let cwd = temp.path().join("repo");
+    fs::create_dir_all(&cwd).expect("cwd");
+    let run_dir = cwd.join("run");
+    fs::create_dir_all(&run_dir).expect("run dir");
+
+    let file = temp.path().join("outside.txt");
+    fs::write(&file, "x").expect("outside file");
+    let pattern = temp.path().join("*.txt");
+
+    let config = test_config(&cwd);
+    let run_control = new_run_control(&config, Duration::from_secs(5));
+    let context = ToolContext::new(
+        &cwd,
+        &run_dir,
+        &config,
+        false,
+        &config.shell,
+        &config.shell_args,
+        &run_control,
+    );
+    let execution = execute_tool(
+        &context,
+        &["glob".to_string()],
+        "glob",
+        &json!({ "pattern": pattern.display().to_string() }),
+    )
+    .expect("glob execution");
+    let payload: Value = serde_json::from_str(&execution.content).expect("json");
+    let matches = payload["matches"].as_array().expect("matches array");
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0], file.display().to_string());
+}
+
+#[test]
+fn glob_absolute_patterns_still_respect_ignored_roots() {
+    let temp = TempDir::new().expect("tempdir");
+    let cwd = temp.path();
+    let run_dir = cwd.join("run");
+    fs::create_dir_all(&run_dir).expect("run dir");
+
+    fs::write(cwd.join(".ignore"), "generated/\n").expect(".ignore");
+    fs::create_dir_all(cwd.join("generated")).expect("generated dir");
+    fs::write(cwd.join("generated/file.txt"), "x").expect("ignored file");
+    let pattern = cwd.join("generated").join("*.txt");
+
+    let config = test_config(cwd);
+    let run_control = new_run_control(&config, Duration::from_secs(5));
+    let context = ToolContext::new(
+        cwd,
+        &run_dir,
+        &config,
+        false,
+        &config.shell,
+        &config.shell_args,
+        &run_control,
+    );
+    let execution = execute_tool(
+        &context,
+        &["glob".to_string()],
+        "glob",
+        &json!({ "pattern": pattern.display().to_string() }),
+    )
+    .expect("glob execution");
+    let payload: Value = serde_json::from_str(&execution.content).expect("json");
+    let matches = payload["matches"].as_array().expect("matches array");
+    assert!(matches.is_empty());
+}
+
+#[test]
+fn glob_results_are_globally_lexicographically_sorted() {
+    let temp = TempDir::new().expect("tempdir");
+    let cwd = temp.path();
+    let run_dir = cwd.join("run");
+    fs::create_dir_all(&run_dir).expect("run dir");
+
+    for path in [
+        "b.txt",
+        "a.txt",
+        "aa/x.txt",
+        "a/zz/m.txt",
+        "a/y.txt",
+        "b/c.txt",
+    ] {
+        let full = cwd.join(path);
+        if let Some(parent) = full.parent() {
+            fs::create_dir_all(parent).expect("parent dir");
+        }
+        fs::write(full, "x").expect("file");
+    }
+
+    let config = test_config(cwd);
+    let run_control = new_run_control(&config, Duration::from_secs(5));
+    let context = ToolContext::new(
+        cwd,
+        &run_dir,
+        &config,
+        false,
+        &config.shell,
+        &config.shell_args,
+        &run_control,
+    );
+    let execution = execute_tool(
+        &context,
+        &["glob".to_string()],
+        "glob",
+        &json!({ "pattern": "**/*.txt" }),
+    )
+    .expect("glob execution");
+    let payload: Value = serde_json::from_str(&execution.content).expect("json");
+    let matches = payload["matches"].as_array().expect("matches array");
+    let actual = matches
+        .iter()
+        .map(|value| value.as_str().expect("match path"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual,
+        vec![
+            "a.txt",
+            "a/y.txt",
+            "a/zz/m.txt",
+            "aa/x.txt",
+            "b.txt",
+            "b/c.txt"
+        ]
+    );
+}
+
+#[test]
 #[cfg(unix)]
 fn glob_non_recursive_patterns_do_not_descend_into_nested_directories() {
     let temp = TempDir::new().expect("tempdir");
