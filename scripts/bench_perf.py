@@ -244,7 +244,16 @@ class Workspace:
                     'name = "auditor"',
                     'description = "auditor role"',
                     'system_prompt_file = "../prompts/auditor.md"',
-                    'user_prefix_file = "../prompts/auditor-user.md"',
+                    "",
+                ]
+            )
+        )
+        (self.repo / "prompts" / "auditor.toml").write_text(
+            "\n".join(
+                [
+                    'name = "auditor"',
+                    'description = "auditor prompt"',
+                    'prompt_file = "auditor-user.md"',
                     "",
                 ]
             )
@@ -403,7 +412,7 @@ def seed_session(workspace: Workspace, session_id: str, turns: int) -> None:
         "char_count": char_count,
         "agent_name": "coder",
         "model": "openai/gpt-4.1",
-        "initial_role": None,
+        "role_name": None,
         "cwd": str(workspace.worktree),
         "effort": "medium",
     }
@@ -426,7 +435,7 @@ def seed_active_sessions(workspace: Workspace, count: int) -> None:
             "char_count": 1,
             "agent_name": "coder",
             "model": "openai/gpt-4.1",
-            "initial_role": None,
+            "role_name": None,
             "cwd": str(workspace.worktree),
             "effort": "medium",
         }

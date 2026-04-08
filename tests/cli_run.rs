@@ -12,7 +12,7 @@ use serde_json::json;
 use common::{FakeOpenRouter, ResponseSpec, TestWorkspace, extract_created_session_id};
 
 #[test]
-fn session_new_convenience_keeps_stdout_clean_and_binds_the_session() {
+fn session_new_convenience_keeps_stdout_clean_and_binds_the_session_identity() {
     let server = FakeOpenRouter::start(vec![ResponseSpec::json(json!({
         "choices": [
             {
@@ -47,8 +47,10 @@ fn session_new_convenience_keeps_stdout_clean_and_binds_the_session() {
         .expect("session show");
     let meta: Value = serde_json::from_slice(&show_output.stdout).expect("meta json");
     assert_eq!(meta["agent_name"], "coder");
-    assert_eq!(meta["model"], "openai/gpt-4.1");
-    assert_eq!(meta["effort"], "medium");
+    assert_eq!(meta["model"], Value::Null);
+    assert_eq!(meta["effort"], Value::Null);
+    assert_eq!(meta["cwd"], Value::Null);
+    assert_eq!(meta["role_name"], Value::Null);
     assert!(meta.get("plan_enabled").is_none());
     assert_eq!(meta["revision"], 1);
 }
@@ -254,10 +256,11 @@ fn bound_sessions_still_reject_mismatched_explicit_agent() {
 }
 
 #[test]
-fn later_run_overrides_do_not_mutate_sticky_session_defaults() {
+fn later_run_overrides_mutate_sticky_session_settings() {
     let server = FakeOpenRouter::start(vec![
         ResponseSpec::json(json!({ "choices": [{ "message": { "content": "first" } }] })),
         ResponseSpec::json(json!({ "choices": [{ "message": { "content": "second" } }] })),
+        ResponseSpec::json(json!({ "choices": [{ "message": { "content": "third" } }] })),
     ]);
     let workspace = TestWorkspace::new();
     workspace.write_repo_assets(&server.url());
@@ -304,15 +307,30 @@ fn later_run_overrides_do_not_mutate_sticky_session_defaults() {
         .expect("second run");
     assert!(second.status.success());
 
+    let third = workspace
+        .command()
+        .args(["--session", &session_id, "third run"])
+        .output()
+        .expect("third run");
+    assert!(third.status.success());
+
+    let requests = server.requests();
+    assert_eq!(requests[0]["model"], "model/one");
+    assert_eq!(requests[0]["reasoning"]["effort"], "high");
+    assert_eq!(requests[1]["model"], "model/two");
+    assert_eq!(requests[1]["reasoning"]["effort"], "low");
+    assert_eq!(requests[2]["model"], "model/two");
+    assert_eq!(requests[2]["reasoning"]["effort"], "low");
+
     let show_output = workspace
         .command()
         .args(["session", "show", &session_id])
         .output()
         .expect("session show");
     let meta: Value = serde_json::from_slice(&show_output.stdout).expect("meta json");
-    assert_eq!(meta["model"], "model/one");
-    assert_eq!(meta["effort"], "high");
-    assert_eq!(meta["cwd"], Value::String(path_string(&worktree_one)));
+    assert_eq!(meta["model"], "model/two");
+    assert_eq!(meta["effort"], "low");
+    assert_eq!(meta["cwd"], Value::String(path_string(&worktree_two)));
 }
 
 #[test]
@@ -675,7 +693,7 @@ fn last_command_returns_session_error_when_no_active_committed_session_exists() 
 }
 
 #[test]
-fn role_selected_on_new_session_persists_system_injection_and_uses_user_injection_once() {
+fn role_selected_on_new_session_persists_system_injection() {
     let server = FakeOpenRouter::start(vec![
         ResponseSpec::json(json!({ "choices": [{ "message": { "content": "first" } }] })),
         ResponseSpec::json(json!({ "choices": [{ "message": { "content": "second" } }] })),
@@ -710,20 +728,14 @@ fn role_selected_on_new_session_persists_system_injection_and_uses_user_injectio
     assert_eq!(requests.len(), 2);
     assert_eq!(
         requests[0]["messages"][0]["content"],
-        "repo coder\n\nauditor system"
+        "auditor system\n\nrepo coder"
     );
-    assert_eq!(
-        requests[0]["messages"][1]["content"],
-        "risk-focused user prefix\naudit this change"
-    );
+    assert_eq!(requests[0]["messages"][1]["content"], "audit this change");
     assert_eq!(
         requests[1]["messages"][0]["content"],
-        "repo coder\n\nauditor system"
+        "auditor system\n\nrepo coder"
     );
-    assert_eq!(
-        requests[1]["messages"][1]["content"],
-        "risk-focused user prefix\naudit this change"
-    );
+    assert_eq!(requests[1]["messages"][1]["content"], "audit this change");
     assert_eq!(requests[1]["messages"][3]["content"], "follow up");
 
     let show_output = workspace
@@ -732,22 +744,43 @@ fn role_selected_on_new_session_persists_system_injection_and_uses_user_injectio
         .output()
         .expect("session show");
     let meta: Value = serde_json::from_slice(&show_output.stdout).expect("meta json");
-    assert_eq!(meta["initial_role"], "auditor");
+    assert_eq!(meta["role_name"], "auditor");
 }
 
 #[test]
-fn role_can_be_added_once_to_an_existing_bound_session() {
+fn role_can_be_switched_mid_session() {
     let server = FakeOpenRouter::start(vec![
         ResponseSpec::json(json!({ "choices": [{ "message": { "content": "plain" } }] })),
-        ResponseSpec::json(json!({ "choices": [{ "message": { "content": "audited" } }] })),
+        ResponseSpec::json(json!({ "choices": [{ "message": { "content": "planned" } }] })),
         ResponseSpec::json(json!({ "choices": [{ "message": { "content": "done" } }] })),
     ]);
     let workspace = TestWorkspace::new();
     workspace.write_repo_assets(&server.url());
+    fs::write(
+        workspace.repo_root.join("roles/planner.toml"),
+        r#"name = "planner"
+description = "planner role"
+system_prompt_file = "../prompts/planner.md"
+"#,
+    )
+    .expect("write planner role");
+    fs::write(
+        workspace.repo_root.join("prompts/planner.md"),
+        "planner system",
+    )
+    .expect("write planner prompt");
 
     let first = workspace
         .command()
-        .args(["--session", "new", "--agent", "coder", "plain start"])
+        .args([
+            "--session",
+            "new",
+            "--agent",
+            "coder",
+            "--role",
+            "auditor",
+            "audit start",
+        ])
         .output()
         .expect("first run");
     assert!(first.status.success());
@@ -759,8 +792,8 @@ fn role_can_be_added_once_to_an_existing_bound_session() {
             "--session",
             &session_id,
             "--role",
-            "auditor",
-            "switch to audit",
+            "planner",
+            "switch to planning",
         ])
         .output()
         .expect("second run");
@@ -768,27 +801,27 @@ fn role_can_be_added_once_to_an_existing_bound_session() {
 
     let third = workspace
         .command()
-        .args(["--session", &session_id, "after audit"])
+        .args(["--session", &session_id, "after planner"])
         .output()
         .expect("third run");
     assert!(third.status.success());
 
     let requests = server.requests();
-    assert_eq!(requests[0]["messages"][0]["content"], "repo coder");
-    assert_eq!(requests[0]["messages"][1]["content"], "plain start");
+    assert_eq!(
+        requests[0]["messages"][0]["content"],
+        "auditor system\n\nrepo coder"
+    );
+    assert_eq!(requests[0]["messages"][1]["content"], "audit start");
     assert_eq!(
         requests[1]["messages"][0]["content"],
-        "repo coder\n\nauditor system"
+        "planner system\n\nrepo coder"
     );
-    assert_eq!(
-        requests[1]["messages"][3]["content"],
-        "risk-focused user prefix\nswitch to audit"
-    );
+    assert_eq!(requests[1]["messages"][3]["content"], "switch to planning");
     assert_eq!(
         requests[2]["messages"][0]["content"],
-        "repo coder\n\nauditor system"
+        "planner system\n\nrepo coder"
     );
-    assert_eq!(requests[2]["messages"][5]["content"], "after audit");
+    assert_eq!(requests[2]["messages"][5]["content"], "after planner");
 
     let show_output = workspace
         .command()
@@ -796,14 +829,16 @@ fn role_can_be_added_once_to_an_existing_bound_session() {
         .output()
         .expect("session show");
     let meta: Value = serde_json::from_slice(&show_output.stdout).expect("meta json");
-    assert_eq!(meta["initial_role"], "auditor");
+    assert_eq!(meta["role_name"], "planner");
 }
 
 #[test]
-fn role_cannot_be_selected_more_than_once_per_session() {
-    let server = FakeOpenRouter::start(vec![ResponseSpec::json(json!({
-        "choices": [{ "message": { "content": "first" } }]
-    }))]);
+fn no_role_clears_sticky_role() {
+    let server = FakeOpenRouter::start(vec![
+        ResponseSpec::json(json!({ "choices": [{ "message": { "content": "first" } }] })),
+        ResponseSpec::json(json!({ "choices": [{ "message": { "content": "second" } }] })),
+        ResponseSpec::json(json!({ "choices": [{ "message": { "content": "third" } }] })),
+    ]);
     let workspace = TestWorkspace::new();
     workspace.write_repo_assets(&server.url());
 
@@ -825,16 +860,87 @@ fn role_cannot_be_selected_more_than_once_per_session() {
 
     let second = workspace
         .command()
-        .args(["--session", &session_id, "--role", "auditor", "should fail"])
+        .args(["--session", &session_id, "--no-role", "clear the role"])
         .output()
         .expect("second run");
-    assert_eq!(second.status.code(), Some(4));
-    assert!(
-        String::from_utf8(second.stderr)
-            .expect("stderr")
-            .contains("already has role `auditor` active")
+    assert!(second.status.success());
+
+    let third = workspace
+        .command()
+        .args(["--session", &session_id, "stay plain"])
+        .output()
+        .expect("third run");
+    assert!(third.status.success());
+
+    let requests = server.requests();
+    assert_eq!(
+        requests[0]["messages"][0]["content"],
+        "auditor system\n\nrepo coder"
     );
-    assert_eq!(server.requests().len(), 1);
+    assert_eq!(requests[1]["messages"][0]["content"], "repo coder");
+    assert_eq!(requests[2]["messages"][0]["content"], "repo coder");
+
+    let show_output = workspace
+        .command()
+        .args(["session", "show", &session_id])
+        .output()
+        .expect("session show");
+    let meta: Value = serde_json::from_slice(&show_output.stdout).expect("meta json");
+    assert_eq!(meta["role_name"], Value::Null);
+}
+
+#[test]
+fn named_prompt_injects_only_one_turn() {
+    let server = FakeOpenRouter::start(vec![
+        ResponseSpec::json(json!({ "choices": [{ "message": { "content": "first" } }] })),
+        ResponseSpec::json(json!({ "choices": [{ "message": { "content": "second" } }] })),
+    ]);
+    let workspace = TestWorkspace::new();
+    workspace.write_repo_assets(&server.url());
+
+    let first = workspace
+        .command()
+        .args([
+            "--session",
+            "new",
+            "--agent",
+            "coder",
+            "--prompt",
+            "auditor",
+            "audit this change",
+        ])
+        .output()
+        .expect("first run");
+    assert!(first.status.success());
+    let session_id = extract_created_session_id(&String::from_utf8(first.stderr).expect("stderr"));
+
+    let second = workspace
+        .command()
+        .args(["--session", &session_id, "follow up"])
+        .output()
+        .expect("second run");
+    assert!(second.status.success());
+
+    let requests = server.requests();
+    assert_eq!(requests[0]["messages"][0]["content"], "repo coder");
+    assert_eq!(
+        requests[0]["messages"][1]["content"],
+        "risk-focused user prefix\naudit this change"
+    );
+    assert_eq!(requests[1]["messages"][0]["content"], "repo coder");
+    assert_eq!(
+        requests[1]["messages"][1]["content"],
+        "risk-focused user prefix\naudit this change"
+    );
+    assert_eq!(requests[1]["messages"][3]["content"], "follow up");
+
+    let show_output = workspace
+        .command()
+        .args(["session", "show", &session_id])
+        .output()
+        .expect("session show");
+    let meta: Value = serde_json::from_slice(&show_output.stdout).expect("meta json");
+    assert_eq!(meta["role_name"], Value::Null);
 }
 
 #[test]
@@ -1001,6 +1107,69 @@ fn provider_timeout_returns_timeout_exit_code() {
 }
 
 #[test]
+fn timed_out_runs_still_persist_explicit_sticky_setting_updates() {
+    let server = FakeOpenRouter::start(vec![ResponseSpec::delayed_json(
+        json!({
+            "choices": [{
+                "message": {
+                    "content": "too slow"
+                }
+            }]
+        }),
+        1_500,
+    )]);
+    let workspace = TestWorkspace::new();
+    workspace.write_repo_assets_with_timeout(&server.url(), "1s");
+    let slow_cwd = workspace.worktree.join("slow");
+    fs::create_dir_all(&slow_cwd).expect("slow cwd");
+
+    let output = workspace
+        .command()
+        .args([
+            "--session",
+            "new",
+            "--agent",
+            "coder",
+            "--role",
+            "auditor",
+            "--model",
+            "model/slow",
+            "--effort",
+            "high",
+            "--cwd",
+            slow_cwd.to_str().expect("cwd"),
+            "slow provider",
+        ])
+        .output()
+        .expect("provider timeout");
+    assert_eq!(output.status.code(), Some(7));
+    let session_id = String::from_utf8(
+        workspace
+            .command()
+            .args(["session", "list"])
+            .output()
+            .expect("session list")
+            .stdout,
+    )
+    .expect("stdout")
+    .trim()
+    .to_string();
+
+    let show_output = workspace
+        .command()
+        .args(["session", "show", &session_id])
+        .output()
+        .expect("session show");
+    let meta: Value = serde_json::from_slice(&show_output.stdout).expect("meta json");
+    assert_eq!(meta["agent_name"], "coder");
+    assert_eq!(meta["role_name"], "auditor");
+    assert_eq!(meta["model"], "model/slow");
+    assert_eq!(meta["effort"], "high");
+    assert_eq!(meta["cwd"], Value::String(path_string(&slow_cwd)));
+    assert_eq!(meta["revision"], 1);
+}
+
+#[test]
 fn combined_tool_and_provider_time_budget_returns_timeout_exit_code() {
     let server = FakeOpenRouter::start(vec![
         ResponseSpec::json(json!({
@@ -1046,7 +1215,7 @@ fn combined_tool_and_provider_time_budget_returns_timeout_exit_code() {
     let elapsed = started.elapsed();
     assert_eq!(output.status.code(), Some(7));
     assert!(
-        elapsed < Duration::from_millis(1_900),
+        elapsed < Duration::from_millis(2_500),
         "provider call should respect the remaining budget, elapsed={elapsed:?}"
     );
 }

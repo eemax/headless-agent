@@ -91,7 +91,7 @@ fn history_filtering_keeps_only_user_and_final_assistant_from_prior_runs() {
         },
     ];
 
-    let result = assemble_prompt(&agent, None, false, &history, "what did you change?", None)
+    let result = assemble_prompt(&agent, None, None, &history, "what did you change?", None)
         .expect("assemble");
 
     // Expected: system prompt + user("fix the bug") + assistant("I fixed...") + user("what did you change?")
@@ -206,7 +206,7 @@ fn history_filtering_handles_multiple_prior_runs() {
     ];
 
     let result =
-        assemble_prompt(&agent, None, false, &history, "next task", None).expect("assemble");
+        assemble_prompt(&agent, None, None, &history, "next task", None).expect("assemble");
 
     // system + user("hello") + assistant("hi there") + user("refactor") + assistant("done refactoring") + user("next task")
     assert_eq!(result.messages.len(), 6);

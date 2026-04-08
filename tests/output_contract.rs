@@ -55,7 +55,7 @@ fn session_list_remains_lexicographically_sorted() {
 }
 
 #[test]
-fn agent_and_role_list_are_resolved_from_repo_root() {
+fn agent_role_and_prompt_list_are_resolved_from_repo_root() {
     let workspace = TestWorkspace::new();
     workspace.write_repo_assets("http://127.0.0.1:9");
 
@@ -69,6 +69,13 @@ fn agent_and_role_list_are_resolved_from_repo_root() {
     workspace
         .command()
         .args(["role", "list"])
+        .assert()
+        .success()
+        .stdout("auditor\n");
+
+    workspace
+        .command()
+        .args(["prompt", "list"])
         .assert()
         .success()
         .stdout("auditor\n");

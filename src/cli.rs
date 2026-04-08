@@ -10,14 +10,15 @@ const USAGE: &str = "usage:
   headless websearch [--type <mode>] [--num_results <n>] [--published_within_days <n>] [--include_domains <domain>]... [--exclude_domains <domain>]... <query...>
   headless agent list
   headless role list
+  headless prompt list
   headless session new
   headless session last
   headless session list
   headless session show <id>
   headless session stop <id>
-  headless new [--agent <name>] [--role <name>] [--model <name>] [--effort <none|minimal|low|medium|high|xhigh>] [--plan] [--cwd <path>] [--verbose] [--debug] \"prompt\"
-  headless last [--fork] [--agent <name>] [--role <name>] [--model <name>] [--effort <none|minimal|low|medium|high|xhigh>] [--plan] [--cwd <path>] [--verbose] [--debug] \"prompt\"
-  headless --session <id|new|last> [--fork] [--agent <name>] [--role <name>] [--model <name>] [--effort <none|minimal|low|medium|high|xhigh>] [--plan] [--cwd <path>] [--verbose] [--debug] \"prompt\"";
+  headless new [--agent <name>] [--role <name>|--no-role] [--prompt <name>] [--model <name>] [--effort <none|minimal|low|medium|high|xhigh>] [--plan] [--cwd <path>] [--verbose] [--debug] \"message\"
+  headless last [--fork] [--agent <name>] [--role <name>|--no-role] [--prompt <name>] [--model <name>] [--effort <none|minimal|low|medium|high|xhigh>] [--plan] [--cwd <path>] [--verbose] [--debug] \"message\"
+  headless --session <id|new|last> [--fork] [--agent <name>] [--role <name>|--no-role] [--prompt <name>] [--model <name>] [--effort <none|minimal|low|medium|high|xhigh>] [--plan] [--cwd <path>] [--verbose] [--debug] \"message\"";
 
 #[derive(Debug, Clone)]
 pub enum Command {
@@ -35,6 +36,7 @@ pub enum Command {
     },
     AgentList,
     RoleList,
+    PromptList,
     SessionNew,
     SessionLast,
     SessionList,
@@ -53,13 +55,15 @@ pub struct RunArgs {
     pub fork: bool,
     pub agent: Option<String>,
     pub role: Option<String>,
+    pub no_role: bool,
+    pub prompt_name: Option<String>,
     pub model: Option<String>,
     pub effort: Option<Effort>,
     pub plan: bool,
     pub cwd: Option<PathBuf>,
     pub verbose: bool,
     pub debug: bool,
-    pub prompt: String,
+    pub message: String,
 }
 
 #[derive(Debug, Clone)]
@@ -95,6 +99,7 @@ where
         Some("websearch") => parse_websearch(&args),
         Some("agent") => parse_simple_list("agent", &args, Command::AgentList),
         Some("role") => parse_simple_list("role", &args, Command::RoleList),
+        Some("prompt") => parse_simple_list("prompt", &args, Command::PromptList),
         Some("session") => parse_session_subcommand(&args),
         Some("new") => parse_run_args(args.iter().skip(1).cloned(), Some(SessionArg::New)),
         Some("last") => parse_run_args(args.iter().skip(1).cloned(), Some(SessionArg::Last)),
@@ -233,6 +238,8 @@ where
     let mut fork = false;
     let mut agent = None;
     let mut role = None;
+    let mut no_role = false;
+    let mut prompt_name = None;
     let mut model = None;
     let mut effort = None;
     let mut plan = false;
@@ -259,7 +266,23 @@ where
                 agent = Some(parser.value()?.to_string_lossy().to_string());
             }
             lexopt::Arg::Long("role") => {
+                if no_role {
+                    return Err(AppError::Usage(format!(
+                        "--role and --no-role cannot be used together\n\n{USAGE}"
+                    )));
+                }
                 role = Some(parser.value()?.to_string_lossy().to_string());
+            }
+            lexopt::Arg::Long("no-role") => {
+                if role.is_some() || no_role {
+                    return Err(AppError::Usage(format!(
+                        "--role and --no-role cannot be used together\n\n{USAGE}"
+                    )));
+                }
+                no_role = true;
+            }
+            lexopt::Arg::Long("prompt") => {
+                prompt_name = Some(parser.value()?.to_string_lossy().to_string());
             }
             lexopt::Arg::Long("model") => {
                 model = Some(parser.value()?.to_string_lossy().to_string());
@@ -305,20 +328,22 @@ where
             "--fork requires an existing session id or `last`\n\n{USAGE}"
         )));
     }
-    let prompt = prompt.ok_or_else(|| AppError::Usage(format!("missing prompt\n\n{USAGE}")))?;
+    let message = prompt.ok_or_else(|| AppError::Usage(format!("missing message\n\n{USAGE}")))?;
 
     Ok(Command::Run(RunArgs {
         session,
         fork,
         agent,
         role,
+        no_role,
+        prompt_name,
         model,
         effort,
         plan,
         cwd,
         verbose,
         debug,
-        prompt,
+        message,
     }))
 }
 
@@ -345,12 +370,12 @@ mod tests {
                 session: SessionArg::New,
                 fork,
                 agent,
-                prompt,
+                message,
                 ..
             }) => {
                 assert!(!fork);
                 assert!(agent.is_none());
-                assert_eq!(prompt, "hello");
+                assert_eq!(message, "hello");
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -365,12 +390,12 @@ mod tests {
                 session: SessionArg::Last,
                 fork,
                 agent,
-                prompt,
+                message,
                 ..
             }) => {
                 assert!(!fork);
                 assert!(agent.is_none());
-                assert_eq!(prompt, "resume");
+                assert_eq!(message, "resume");
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -385,11 +410,11 @@ mod tests {
             Command::Run(RunArgs {
                 session: SessionArg::Last,
                 fork,
-                prompt,
+                message,
                 ..
             }) => {
                 assert!(fork);
-                assert_eq!(prompt, "resume");
+                assert_eq!(message, "resume");
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -404,14 +429,63 @@ mod tests {
             Command::Run(RunArgs {
                 session: SessionArg::Existing(id),
                 fork,
-                prompt,
+                message,
                 ..
             }) => {
                 assert_eq!(id, "abc123");
                 assert!(fork);
-                assert_eq!(prompt, "continue");
+                assert_eq!(message, "continue");
             }
             other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_parses_prompt_and_role_flags() {
+        let command = parse_from_args([
+            "--session",
+            "new",
+            "--role",
+            "auditor",
+            "--prompt",
+            "auditor",
+            "audit this commit",
+        ])
+        .expect("parse run");
+
+        match command {
+            Command::Run(RunArgs {
+                role,
+                no_role,
+                prompt_name,
+                message,
+                ..
+            }) => {
+                assert_eq!(role.as_deref(), Some("auditor"));
+                assert!(!no_role);
+                assert_eq!(prompt_name.as_deref(), Some("auditor"));
+                assert_eq!(message, "audit this commit");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_rejects_role_and_no_role_together() {
+        let error = parse_from_args([
+            "--session",
+            "new",
+            "--role",
+            "auditor",
+            "--no-role",
+            "hello",
+        ])
+        .expect_err("conflicting role flags");
+        match error {
+            AppError::Usage(message) => {
+                assert!(message.contains("--role and --no-role cannot be used together"))
+            }
+            other => panic!("unexpected error: {other}"),
         }
     }
 

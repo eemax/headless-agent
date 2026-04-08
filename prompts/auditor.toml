@@ -1,0 +1,3 @@
+name = "auditor"
+description = "Risk-focused review prompt"
+prompt_file = "auditor-user.md"

@@ -21,14 +21,14 @@ For a prompt run, the flow is:
 1. Parse CLI args in [src/cli.rs](../src/cli.rs).
 2. Discover Headless roots and load global config in [src/config.rs](../src/config.rs).
 3. Create or load the target session through [src/session/mod.rs](../src/session/mod.rs).
-4. Resolve the effective agent and optional role via [src/agent_def.rs](../src/agent_def.rs) and [src/role_def.rs](../src/role_def.rs).
+4. Resolve the effective agent, optional role, and optional named prompt via [src/agent_def.rs](../src/agent_def.rs), [src/role_def.rs](../src/role_def.rs), and [src/prompt_def.rs](../src/prompt_def.rs).
 5. Read stdin if present, load prior messages, and assemble provider messages in [src/prompt.rs](../src/prompt.rs).
 6. Create a per-run directory under the session and execute the assistant/tool loop in [src/agent/loop.rs](../src/agent/loop.rs).
 7. If the run reaches a mutating tool, acquire the session execution lock before side effects and hold it through append.
 8. Re-acquire the session lock, verify the stored revision did not change, append JSONL records, and update `meta.json`.
 9. Print only the final assistant text to stdout.
 
-Non-run commands such as `version`, `agent list`, `role list`, and `session show` stop earlier and do not enter the provider loop.
+Non-run commands such as `version`, `agent list`, `role list`, `prompt list`, and `session show` stop earlier and do not enter the provider loop.
 
 ## Module Map
 
@@ -42,8 +42,8 @@ Non-run commands such as `version`, `agent list`, `role list`, and `session show
   Error categories and stable numeric exit codes.
 - [src/config.rs](../src/config.rs)
   Root discovery and `config.toml` loading.
-- [src/agent_def.rs](../src/agent_def.rs) and [src/role_def.rs](../src/role_def.rs)
-  Agent and role TOML loading plus relative prompt-path resolution.
+- [src/agent_def.rs](../src/agent_def.rs), [src/role_def.rs](../src/role_def.rs), and [src/prompt_def.rs](../src/prompt_def.rs)
+  Agent, role, and named-prompt TOML loading plus relative prompt-path resolution.
 - [src/prompt.rs](../src/prompt.rs)
   Prompt stack assembly and rough token estimation.
 - [src/provider/openrouter.rs](../src/provider/openrouter.rs)
@@ -82,10 +82,13 @@ Important behavior:
 - session ids and run ids are lowercase ULIDs
 - `headless session new` creates the session directory immediately
 - `headless session last` prints the most recently updated non-stopped session id with committed history
-- new sessions start unbound, with `agent_name`, `model`, `effort`, `cwd`, and `initial_role` set to `null`
+- new sessions start unbound, with `agent_name`, `model`, `effort`, `cwd`, and `role_name` set to `null`
 - unbound prompt runs may resolve the agent from `config.default_agent` when `--agent` is omitted
-- the first successful prompt run binds the session to an `agent_name` and stores sticky defaults for `model`, `effort`, `cwd`, and `initial_role`
-- later runs may override `--model`, `--effort`, and `--cwd` per invocation without mutating those stored defaults
+- the first committed prompt run binds the session to an `agent_name`
+- explicit `--role`, `--model`, `--effort`, and `--cwd` update the stored session setting when the run commits
+- omitted `--role`, `--model`, `--effort`, and `--cwd` reuse the stored session setting if present
+- agent defaults and the shell's current working directory may be used for a run without being auto-stored
+- `--no-role` clears the stored `role_name` when the run commits
 - `--plan` is per-invocation only and is not stored in `meta.json`
 - `session stop` marks the session as stopped, blocks new runs, and still allows already-started runs to finish, even if they reach their first mutating tool later
 - `--fork` snapshots a persisted session into a fresh active session by copying `meta.json` state and `messages.jsonl`, while starting with an empty `runs/` directory
@@ -125,10 +128,10 @@ Mutating tools add one more guardrail:
 
 Current prompt assembly order:
 
-1. agent system prompt
-2. role system prompt, if present
+1. role system prompt, if present
+2. agent system prompt
 3. replay-oriented session history: only user messages and assistant messages without tool calls are sent back; tool-call-bearing assistant messages and tool result messages are skipped
-4. current user prompt, prefixed by role user text if present
+4. current user message, prefixed by named prompt text if present
 5. stdin as an extra user message, if present
 
 First-pass limitations:

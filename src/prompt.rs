@@ -1,6 +1,7 @@
 use crate::{
     agent_def::LoadedAgent,
     error::AppError,
+    prompt_def::LoadedPrompt,
     role_def::LoadedRole,
     types::{MessageRole, PromptMessage, TranscriptRecord},
 };
@@ -9,15 +10,15 @@ use crate::{
 pub struct PromptAssembly {
     pub messages: Vec<PromptMessage>,
     pub estimated_tokens: usize,
-    pub current_user_prompt: String,
+    pub current_user_message: String,
 }
 
 pub fn assemble_prompt(
     agent: &LoadedAgent,
     role: Option<&LoadedRole>,
-    apply_role_user_prefix: bool,
+    prompt: Option<&LoadedPrompt>,
     history: &[TranscriptRecord],
-    user_prompt: &str,
+    user_message: &str,
     stdin: Option<&str>,
 ) -> Result<PromptAssembly, AppError> {
     let mut messages = Vec::new();
@@ -57,11 +58,11 @@ pub fn assemble_prompt(
         }
     }
 
-    let current_prompt = build_current_user_prompt(role, apply_role_user_prefix, user_prompt);
+    let current_message = build_current_user_message(prompt, user_message);
 
     messages.push(PromptMessage {
         role: MessageRole::User,
-        content: Some(current_prompt.clone()),
+        content: Some(current_message.clone()),
         name: None,
         tool_call_id: None,
         tool_calls: Vec::new(),
@@ -81,43 +82,38 @@ pub fn assemble_prompt(
     Ok(PromptAssembly {
         messages,
         estimated_tokens,
-        current_user_prompt: current_prompt,
+        current_user_message: current_message,
     })
 }
 
 fn build_system_prompt(agent: &LoadedAgent, role: Option<&LoadedRole>) -> String {
     let mut parts = Vec::new();
-    let base = agent.system_prompt.trim();
-    if !base.is_empty() {
-        parts.push(base);
-    }
     if let Some(system_prompt) = role.and_then(|value| value.system_prompt.as_deref()) {
         let trimmed = system_prompt.trim();
         if !trimmed.is_empty() {
             parts.push(trimmed);
         }
     }
+    let base = agent.system_prompt.trim();
+    if !base.is_empty() {
+        parts.push(base);
+    }
     parts.join("\n\n")
 }
 
-fn build_current_user_prompt(
-    role: Option<&LoadedRole>,
-    apply_role_user_prefix: bool,
-    user_prompt: &str,
-) -> String {
-    let mut current_prompt = String::new();
-    if apply_role_user_prefix
-        && let Some(prefix) = role
-            .and_then(|value| value.user_prefix.as_deref())
-            .filter(|value| !value.trim().is_empty())
+fn build_current_user_message(prompt: Option<&LoadedPrompt>, user_message: &str) -> String {
+    let mut current_message = String::new();
+    if let Some(prefix) = prompt
+        .map(|value| value.prompt.as_str())
+        .filter(|value| !value.trim().is_empty())
     {
-        current_prompt.push_str(prefix);
+        current_message.push_str(prefix);
         if !prefix.ends_with('\n') {
-            current_prompt.push('\n');
+            current_message.push('\n');
         }
     }
-    current_prompt.push_str(user_prompt);
-    current_prompt
+    current_message.push_str(user_message);
+    current_message
 }
 
 /// Pre-flight rough estimate based on character count (chars / 4).
@@ -138,6 +134,7 @@ mod tests {
     use super::assemble_prompt;
     use crate::{
         agent_def::{AgentDef, LoadedAgent},
+        prompt_def::{LoadedPrompt, PromptDef},
         role_def::{LoadedRole, RoleDef},
         types::Effort,
     };
@@ -165,29 +162,36 @@ mod tests {
         }
     }
 
-    fn loaded_role(system_prompt: Option<&str>, user_prefix: Option<&str>) -> LoadedRole {
+    fn loaded_role(system_prompt: Option<&str>) -> LoadedRole {
         LoadedRole {
             def: RoleDef {
                 name: "auditor".to_string(),
                 description: None,
                 system_prompt_file: None,
-                user_prefix_file: None,
             },
             path: PathBuf::new(),
             system_prompt: system_prompt.map(ToOwned::to_owned),
-            user_prefix: user_prefix.map(ToOwned::to_owned),
+        }
+    }
+
+    fn loaded_prompt(prompt: Option<&str>) -> LoadedPrompt {
+        LoadedPrompt {
+            def: PromptDef {
+                name: "auditor".to_string(),
+                description: None,
+                prompt_file: "prompt.md".to_string(),
+            },
+            path: PathBuf::new(),
+            prompt: prompt.unwrap_or_default().to_string(),
         }
     }
 
     #[test]
-    fn assemble_prompt_combines_agent_and_role_into_one_system_message() {
+    fn assemble_prompt_combines_role_and_agent_into_one_system_message() {
         let prompt = assemble_prompt(
             &loaded_agent(vec!["web_search".to_string(), "web_fetch".to_string()]),
-            Some(&loaded_role(
-                Some("auditor system"),
-                Some("role user prefix"),
-            )),
-            true,
+            Some(&loaded_role(Some("auditor system"))),
+            Some(&loaded_prompt(Some("named prompt"))),
             &[],
             "find docs",
             None,
@@ -197,24 +201,21 @@ mod tests {
         assert_eq!(prompt.messages.len(), 2);
         assert_eq!(
             prompt.messages[0].content.as_deref(),
-            Some("base prompt\n\nauditor system")
+            Some("auditor system\n\nbase prompt")
         );
         assert_eq!(
             prompt.messages[1].content.as_deref(),
-            Some("role user prefix\nfind docs")
+            Some("named prompt\nfind docs")
         );
-        assert_eq!(prompt.current_user_prompt, "role user prefix\nfind docs");
+        assert_eq!(prompt.current_user_message, "named prompt\nfind docs");
     }
 
     #[test]
-    fn assemble_prompt_applies_role_user_prefix_only_when_requested() {
+    fn assemble_prompt_skips_empty_named_prompt_text() {
         let prompt = assemble_prompt(
             &loaded_agent(vec!["bash".to_string()]),
-            Some(&loaded_role(
-                Some("auditor system"),
-                Some("role user prefix"),
-            )),
-            false,
+            Some(&loaded_role(Some("auditor system"))),
+            Some(&loaded_prompt(Some("   "))),
             &[],
             "find docs",
             None,
@@ -223,18 +224,18 @@ mod tests {
 
         assert_eq!(
             prompt.messages[0].content.as_deref(),
-            Some("base prompt\n\nauditor system")
+            Some("auditor system\n\nbase prompt")
         );
         assert_eq!(prompt.messages[1].content.as_deref(), Some("find docs"));
-        assert_eq!(prompt.current_user_prompt, "find docs");
+        assert_eq!(prompt.current_user_message, "find docs");
     }
 
     #[test]
     fn assemble_prompt_skips_empty_role_sections() {
         let prompt = assemble_prompt(
             &loaded_agent(vec!["bash".to_string()]),
-            Some(&loaded_role(Some("   "), Some("   "))),
-            true,
+            Some(&loaded_role(Some("   "))),
+            None,
             &[],
             "find docs",
             None,

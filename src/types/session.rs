@@ -12,7 +12,7 @@ pub struct SessionMeta {
     pub char_count: usize,
     pub agent_name: Option<String>,
     pub model: Option<String>,
-    pub initial_role: Option<String>,
+    pub role_name: Option<String>,
     pub cwd: Option<String>,
     pub effort: Option<Effort>,
 }

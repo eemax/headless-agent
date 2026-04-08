@@ -174,10 +174,17 @@ api_key_env = "OPENROUTER_API_KEY"
             r#"name = "auditor"
 description = "auditor role"
 system_prompt_file = "../prompts/auditor.md"
-user_prefix_file = "../prompts/auditor-user.md"
 "#,
         )
         .expect("write role");
+        fs::write(
+            root.join("prompts/auditor.toml"),
+            r#"name = "auditor"
+description = "auditor prompt"
+prompt_file = "auditor-user.md"
+"#,
+        )
+        .expect("write prompt def");
         fs::write(root.join("prompts/auditor.md"), "auditor system").expect("write auditor prompt");
         fs::write(
             root.join("prompts/auditor-user.md"),
@@ -216,8 +223,8 @@ pub fn new_run_control_with_interrupt(
 
 pub fn extract_created_session_id(stderr: &str) -> String {
     stderr
-        .split_whitespace()
-        .last()
+        .lines()
+        .find_map(|line| line.strip_prefix("created session "))
         .expect("session id in stderr")
         .trim()
         .to_string()

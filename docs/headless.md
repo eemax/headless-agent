@@ -4,6 +4,7 @@ This document describes the current `.toml` configuration surfaces implemented i
 - global `config.toml`
 - agent files in `agents/*.toml`
 - role files in `roles/*.toml`
+- named prompt files in `prompts/*.toml`
 
 It reflects the current code, including runtime defaults and first-pass limitations.
 
@@ -19,7 +20,7 @@ Resolution order is repo root first, then home root.
 Current implementation notes:
 - `HEADLESS_REPO_ROOT` can override the repo root for testing or harnessing
 - `HEADLESS_HOME_ROOT` can override the home root for testing or harnessing
-- `--cwd` does not affect config, agent, or role lookup
+- `--cwd` does not affect config, agent, role, or prompt lookup
 - prompt-file paths are resolved relative to the TOML file that references them
 
 ## Global `config.toml`
@@ -155,7 +156,7 @@ timeout = "1h"
 `default_model`
 - Type: string
 - Default: none
-- Notes: used when `--model` is omitted and the session is not yet bound to another default
+- Notes: used when `--model` is omitted and the session does not already store a model override
 
 `default_effort`
 - Type: string enum
@@ -238,12 +239,12 @@ Unknown tool names are ignored when building provider tool definitions, but a mo
 
 Current effective value precedence is:
 
-1. explicit run flags such as `--model` or `--effort`
-2. stored sticky session defaults, once the session has been bound
+1. explicit run flags such as `--role`, `--model`, `--effort`, or `--cwd`
+2. stored sticky session settings, if present
 3. agent file values
 4. global config or process environment fallback where applicable
 
-`--plan` is intentionally not part of session-default precedence. It applies only to the current invocation.
+`--prompt` and `--plan` are intentionally not part of session-setting precedence. They apply only to the current invocation.
 
 ## Role Files
 
@@ -259,7 +260,6 @@ Roles are prompt-framing overlays, not independent runnable agents.
 name = "auditor"
 description = "Risk-focused review framing"
 system_prompt_file = "../prompts/auditor.md"
-user_prefix_file = "../prompts/auditor-user.md"
 ```
 
 ### Field Reference
@@ -276,12 +276,39 @@ user_prefix_file = "../prompts/auditor-user.md"
 `system_prompt_file`
 - Type: string path
 - Default: unset
-- Purpose: appended to the system-prompt stack after the agent system prompt
+- Purpose: prepended to the system-prompt stack before the agent system prompt
 
-`user_prefix_file`
+## Prompt Files
+
+Supported locations:
+- `<repo-root>/prompts/<name>.toml`
+- `~/.headless-agent/prompts/<name>.toml`
+
+Named prompts are one-turn user-message overlays. They are not session settings.
+
+### Example
+
+```toml
+name = "auditor"
+description = "Risk-focused audit framing"
+prompt_file = "auditor-user.md"
+```
+
+### Field Reference
+
+`name`
+- Type: string
+- Default: none
+- Notes: required
+
+`description`
+- Type: string
+- Default: unset
+
+`prompt_file`
 - Type: string path
 - Default: unset
-- Purpose: prepended to the current user prompt only
+- Purpose: prepended to the current user message for one run only
 
 ## Prompt File Notes
 
@@ -304,15 +331,22 @@ New sessions start with:
   "model": null,
   "effort": null,
   "cwd": null,
-  "initial_role": null
+  "role_name": null
 }
 ```
 
-On the first successful prompt run, those fields are bound from the effective runtime values and then reused as sticky defaults when later runs omit them. Plan mode is never stored in session metadata.
+Current runtime behavior:
+- `agent_name` binds on the first committed prompt run and cannot be switched later
+- explicit `--role`, `--model`, `--effort`, and `--cwd` update the stored session value when the run commits
+- omitted `--role`, `--model`, `--effort`, and `--cwd` reuse the stored session value if present
+- agent defaults and the shell's current working directory may be used for a run without being auto-stored
+- `--no-role` clears `role_name` when the run commits
+- named prompts from `--prompt` are never stored in session metadata
+- plan mode is never stored in session metadata
 
 Current session-selection shortcuts:
-- `headless new "prompt"` is shorthand for starting a run with `--session new`
-- `headless last "prompt"` is shorthand for starting a run with `--session last`
+- `headless new "message"` is shorthand for starting a run with `--session new`
+- `headless last "message"` is shorthand for starting a run with `--session last`
 - `headless session last` prints the most recently updated non-stopped session id with committed history
 
 ## First-Pass Limitations

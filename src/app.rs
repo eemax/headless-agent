@@ -17,19 +17,12 @@ use crate::{
     config::{GlobalConfig, HeadlessRoots},
     error::AppError,
     prompt::assemble_prompt,
+    prompt_def::LoadedPrompt,
     role_def::LoadedRole,
     session::{self, SessionCommit, SessionStore, new_id, now_rfc3339},
     tools::{web_fetch, web_search},
     types::{LoopTermination, MessageRole, RunOutcome, RunResult, SessionMeta, TranscriptRecord},
 };
-
-struct BoundRunValues<'a> {
-    agent_name: &'a str,
-    model: &'a str,
-    effort: crate::types::Effort,
-    cwd: &'a std::path::Path,
-    role_name: Option<&'a str>,
-}
 
 #[derive(Debug, Serialize)]
 struct PersistedRunOutcome<'a> {
@@ -104,6 +97,10 @@ pub fn run(command: Command, interrupted: Arc<AtomicBool>) -> Result<AppOutput, 
         }),
         Command::RoleList => Ok(AppOutput {
             stdout: format_lines(roots.list_roles()?),
+            stderr: Vec::new(),
+        }),
+        Command::PromptList => Ok(AppOutput {
+            stdout: format_lines(roots.list_prompts()?),
             stderr: Vec::new(),
         }),
         Command::SessionNew => {
@@ -211,27 +208,25 @@ fn run_prompt(
     };
 
     let agent = LoadedAgent::load(&roots, &agent_name)?;
-    let (role_invoked_this_run, role_name) = match (
-        args.role.as_deref(),
-        session_meta.initial_role.as_deref(),
-    ) {
-        (Some(role_name), Some(bound_role)) if role_name == bound_role => {
-            return Err(AppError::Session(format!(
-                "session `{session_id}` already has role `{bound_role}` active; `--role {role_name}` has no effect because roles can only be selected once per session"
-            )));
-        }
-        (Some(role_name), Some(bound_role)) => {
-            return Err(AppError::Session(format!(
-                "session `{session_id}` already has role `{bound_role}`; roles can only be selected once per session, so `--role {role_name}` is not allowed"
-            )));
-        }
-        (Some(role_name), None) => (true, Some(role_name.to_string())),
-        (None, Some(bound_role)) => (false, Some(bound_role.to_string())),
-        (None, None) => (false, None),
+    let role_name_update = match (args.no_role, args.role.as_deref()) {
+        (true, None) => Some(None),
+        (false, Some(role_name)) => Some(Some(role_name)),
+        (false, None) => None,
+        (true, Some(_)) => unreachable!("cli parser rejects --role with --no-role"),
+    };
+    let role_name = match role_name_update {
+        Some(Some(role_name)) => Some(role_name.to_string()),
+        Some(None) => None,
+        None => session_meta.role_name.clone(),
     };
     let role = role_name
         .as_ref()
         .map(|name| LoadedRole::load(&roots, name))
+        .transpose()?;
+    let prompt = args
+        .prompt_name
+        .as_ref()
+        .map(|name| LoadedPrompt::load(&roots, name))
         .transpose()?;
 
     let model = args
@@ -255,9 +250,9 @@ fn run_prompt(
     let prompt = assemble_prompt(
         &agent,
         role.as_ref(),
-        role_invoked_this_run,
+        prompt.as_ref(),
         &history,
-        &args.prompt,
+        &args.message,
         stdin.as_deref(),
     )?;
     let compaction_at_tokens = agent.def.compaction_at_tokens.unwrap_or(180_000);
@@ -269,7 +264,7 @@ fn run_prompt(
 
     let session_dir = store.session_dir(&session_id);
     let run_id = new_id();
-    let user_records = build_user_records(&run_id, &prompt.current_user_prompt, stdin.as_deref())?;
+    let user_records = build_user_records(&run_id, &prompt.current_user_message, stdin.as_deref())?;
     let run_dir = create_run_dir(&session_dir, &run_id)?;
     let run_context = AgentRunContext {
         session_id: session_id.clone(),
@@ -293,15 +288,17 @@ fn run_prompt(
     } = run_agent_loop(run_context)?;
     let final_text = result.final_text.clone();
     let termination = result.termination.clone();
-    let bound_values = BoundRunValues {
-        agent_name: &agent_name,
-        model: &model,
-        effort,
-        cwd: &effective_cwd,
-        role_name: role_name.as_deref(),
-    };
     persist_run_trace(&run_dir, &user_records, &result)?;
-    let commit = build_commit(&session_meta, &result, &user_records, &bound_values);
+    let commit = build_commit(
+        &session_meta,
+        &result,
+        &user_records,
+        &agent_name,
+        role_name_update,
+        args.model.as_deref(),
+        args.effort,
+        args.cwd.as_deref(),
+    );
     store.append_run(&session_id, commit, execution_guard.as_ref())?;
 
     if let Some(err) = termination.into_error() {
@@ -331,7 +328,11 @@ fn build_commit(
     session_meta: &SessionMeta,
     result: &RunResult,
     user_records: &[TranscriptRecord],
-    bound_values: &BoundRunValues<'_>,
+    agent_name: &str,
+    role_name_update: Option<Option<&str>>,
+    model_update: Option<&str>,
+    effort_update: Option<crate::types::Effort>,
+    cwd_update: Option<&Path>,
 ) -> SessionCommit {
     let records = project_session_history(user_records, result);
     let char_count_delta = records.iter().map(|record| record.char_count()).sum();
@@ -342,21 +343,11 @@ fn build_commit(
         bind_agent_name: session_meta
             .agent_name
             .is_none()
-            .then(|| bound_values.agent_name.to_string()),
-        bind_model: session_meta
-            .model
-            .is_none()
-            .then(|| bound_values.model.to_string()),
-        bind_effort: session_meta.effort.is_none().then_some(bound_values.effort),
-        bind_cwd: session_meta
-            .cwd
-            .is_none()
-            .then(|| bound_values.cwd.display().to_string()),
-        bind_initial_role: session_meta
-            .initial_role
-            .is_none()
-            .then(|| bound_values.role_name.map(ToOwned::to_owned))
-            .flatten(),
+            .then(|| agent_name.to_string()),
+        update_model: model_update.map(ToOwned::to_owned),
+        update_effort: effort_update,
+        update_cwd: cwd_update.map(|cwd| cwd.display().to_string()),
+        update_role_name: role_name_update.map(|value| value.map(ToOwned::to_owned)),
     }
 }
 

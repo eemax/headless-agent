@@ -12,7 +12,6 @@ pub struct RoleDef {
     pub name: String,
     pub description: Option<String>,
     pub system_prompt_file: Option<String>,
-    pub user_prefix_file: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -20,7 +19,6 @@ pub struct LoadedRole {
     pub def: RoleDef,
     pub path: PathBuf,
     pub system_prompt: Option<String>,
-    pub user_prefix: Option<String>,
 }
 
 impl LoadedRole {
@@ -50,24 +48,10 @@ impl LoadedRole {
                     path.display()
                 ))
             })?;
-        let user_prefix = def
-            .user_prefix_file
-            .as_ref()
-            .map(|value| resolve_relative(&path, value))
-            .transpose()?
-            .map(fs::read_to_string)
-            .transpose()
-            .map_err(|err| {
-                AppError::Config(format!(
-                    "failed to read role prompt {}: {err}",
-                    path.display()
-                ))
-            })?;
         Ok(Self {
             def,
             path,
             system_prompt,
-            user_prefix,
         })
     }
 }

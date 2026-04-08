@@ -7,8 +7,8 @@ This repo contains the first implementation pass: a Rust binary with durable ses
 ## Current Scope
 
 Implemented now:
-- CLI entrypoints for `version`, `agent list`, `role list`, and `session new|last|list|show|stop`
-- prompt runs with `new`, `last`, or `--session <id|new|last>`, optional `--fork`, optional `--agent`, optional `--role`, `--model`, `--effort`, `--plan`, and `--cwd`
+- CLI entrypoints for `version`, `agent list`, `role list`, `prompt list`, and `session new|last|list|show|stop`
+- prompt runs with `new`, `last`, or `--session <id|new|last>`, optional `--fork`, optional `--agent`, optional `--role` or `--no-role`, optional `--prompt`, `--model`, `--effort`, `--plan`, and `--cwd`
 - OpenRouter chat completions integration
 - session metadata and JSONL transcript persistence
 - optimistic same-session conflict detection plus a dedicated mutating-run execution lock
@@ -37,6 +37,7 @@ cargo run -- webfetch https://example.com
 cargo run -- websearch rust async runtimes
 cargo run -- agent list
 cargo run -- role list
+cargo run -- prompt list
 ```
 
 `websearch` requires `EXA_API_KEY` and currently exposes the simplified Exa search modes `auto`, `neural`, and `deep`.
@@ -100,9 +101,11 @@ With that setup, code changes only require:
 cargo build --release
 ```
 
-If you invoke `headless` inside another repo without `--cwd`, tool execution uses the shell's current working directory. Passing `--cwd` overrides that for the current run. On the first successful prompt run in a session, the effective cwd is stored as that session's sticky default and reused by later runs in the same session when `--cwd` is omitted.
+If you invoke `headless` inside another repo without `--cwd`, tool execution uses the shell's current working directory. Passing `--cwd` updates the session's stored cwd when the run commits. If a session already has a stored cwd, omitting `--cwd` reuses it; otherwise the shell's current working directory is used for that run only.
 
 The starter `config.toml` also sets `default_agent = "coder"`, so unbound sessions resolve to the repo-shipped `coder` agent unless you explicitly pass `--agent`.
+
+`--role` is a sticky system-prompt overlay for the session and may be switched or cleared later with `--role <name>` or `--no-role`. `--prompt <name>` is a one-turn user-message overlay and is never stored in session metadata.
 
 For scripting and inspection, `headless session last` prints the resolved most recent active session id to stdout.
 
@@ -113,7 +116,7 @@ Headless configuration is resolved from exactly two roots:
 1. the repo root during development
 2. `~/.headless-agent/`
 
-The code checks the repo root first, then the home root. `--cwd` affects tool execution only; it does not affect agent, role, or config resolution.
+The code checks the repo root first, then the home root. `--cwd` affects tool execution only; it does not affect agent, role, prompt, or config resolution.
 
 Current implementation note: repo-root discovery is compiled from the source checkout used to build the binary, so an installed `headless` binary still prefers that checkout's `agents/`, `roles/`, and `config.toml` as long as the checkout exists. For a standalone global setup, place config under `~/.headless-agent/`.
 
@@ -131,7 +134,7 @@ For tests and local harnessing, the implementation also supports `HEADLESS_REPO_
 ```text
 agents/      Starter agent definitions
 roles/       Starter role definitions
-prompts/     Prompt text files referenced by agent and role TOML
+prompts/     Named prompt definitions plus prompt text assets
 src/         Runtime implementation
 tests/       CLI, provider, session, and tool contract coverage
 scripts/     Small operational helpers such as bench.sh

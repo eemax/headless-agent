@@ -37,13 +37,16 @@ Do not break these without a deliberate product decision:
 - metadata and diagnostics belong on stderr
 
 Root resolution
-- config, agents, and roles resolve from the repo root first, then `~/.headless-agent/`
+- config, agents, roles, and named prompts resolve from the repo root first, then `~/.headless-agent/`
 - `--cwd` must not affect those lookups
 
 Session identity
-- a session is bound to a single `agent_name` on the first successful prompt run
+- a session is bound to a single `agent_name` on the first committed prompt run
 - `config.default_agent` is only a fallback for unbound prompt runs; it does not override a bound session
-- later runs may override `--model`, `--effort`, and `--cwd` without mutating stored sticky defaults
+- explicit `--role`, `--model`, `--effort`, and `--cwd` update the stored session setting when the run commits
+- omitted `--role`, `--model`, `--effort`, and `--cwd` reuse the stored session value if present
+- fallback values from the agent file or current shell state are not auto-stored
+- `--prompt` is per-run only and is never stored in session metadata
 - `--plan` is per-run only and is never stored in session metadata
 
 Concurrency

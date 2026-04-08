@@ -34,10 +34,10 @@ pub struct SessionCommit {
     pub char_count_delta: usize,
     pub records: Vec<TranscriptRecord>,
     pub bind_agent_name: Option<String>,
-    pub bind_model: Option<String>,
-    pub bind_effort: Option<Effort>,
-    pub bind_cwd: Option<String>,
-    pub bind_initial_role: Option<String>,
+    pub update_model: Option<String>,
+    pub update_effort: Option<Effort>,
+    pub update_cwd: Option<String>,
+    pub update_role_name: Option<Option<String>>,
 }
 
 impl SessionStore {
@@ -65,7 +65,7 @@ impl SessionStore {
             char_count: 0,
             agent_name: None,
             model: None,
-            initial_role: None,
+            role_name: None,
             cwd: None,
             effort: None,
         };
@@ -108,7 +108,7 @@ impl SessionStore {
                     char_count: source_meta.char_count,
                     agent_name: source_meta.agent_name,
                     model: source_meta.model,
-                    initial_role: source_meta.initial_role,
+                    role_name: source_meta.role_name,
                     cwd: source_meta.cwd,
                     effort: source_meta.effort,
                 };
@@ -285,17 +285,17 @@ impl SessionStore {
         if meta.agent_name.is_none() {
             meta.agent_name = commit.bind_agent_name;
         }
-        if meta.model.is_none() {
-            meta.model = commit.bind_model;
+        if let Some(model) = commit.update_model {
+            meta.model = Some(model);
         }
-        if meta.effort.is_none() {
-            meta.effort = commit.bind_effort;
+        if let Some(effort) = commit.update_effort {
+            meta.effort = Some(effort);
         }
-        if meta.cwd.is_none() {
-            meta.cwd = commit.bind_cwd;
+        if let Some(cwd) = commit.update_cwd {
+            meta.cwd = Some(cwd);
         }
-        if meta.initial_role.is_none() {
-            meta.initial_role = commit.bind_initial_role;
+        if let Some(role_name) = commit.update_role_name {
+            meta.role_name = role_name;
         }
         meta.updated_at = now_rfc3339()?;
         meta.revision += 1;
@@ -427,10 +427,10 @@ mod tests {
             char_count_delta: record.char_count(),
             records: vec![record],
             bind_agent_name: None,
-            bind_model: None,
-            bind_effort: None,
-            bind_cwd: None,
-            bind_initial_role: None,
+            update_model: None,
+            update_effort: None,
+            update_cwd: None,
+            update_role_name: None,
         };
 
         let ready = Arc::new(Barrier::new(2));
@@ -501,10 +501,10 @@ mod tests {
             char_count_delta: record.char_count(),
             records: vec![record],
             bind_agent_name: Some("coder".to_string()),
-            bind_model: Some("model/one".to_string()),
-            bind_effort: Some(Effort::High),
-            bind_cwd: Some("/tmp/worktree".to_string()),
-            bind_initial_role: Some("auditor".to_string()),
+            update_model: Some("model/one".to_string()),
+            update_effort: Some(Effort::High),
+            update_cwd: Some("/tmp/worktree".to_string()),
+            update_role_name: Some(Some("auditor".to_string())),
         };
         store
             .append_run(&session_id, commit, None)
@@ -520,7 +520,7 @@ mod tests {
         assert_eq!(forked.model.as_deref(), Some("model/one"));
         assert_eq!(forked.effort, Some(Effort::High));
         assert_eq!(forked.cwd.as_deref(), Some("/tmp/worktree"));
-        assert_eq!(forked.initial_role.as_deref(), Some("auditor"));
+        assert_eq!(forked.role_name.as_deref(), Some("auditor"));
         assert!(forked.stopped_at.is_none());
         assert_eq!(
             store
@@ -670,7 +670,7 @@ mod tests {
             char_count: 0,
             agent_name: Some("coder".to_string()),
             model: Some("model/one".to_string()),
-            initial_role: None,
+            role_name: None,
             cwd: Some("/tmp/worktree".to_string()),
             effort: Some(Effort::Medium),
         }

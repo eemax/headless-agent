@@ -30,6 +30,7 @@ fn new_sessions_start_unbound_with_nullable_runtime_fields() {
     assert_eq!(meta["model"], Value::Null);
     assert_eq!(meta["effort"], Value::Null);
     assert_eq!(meta["cwd"], Value::Null);
+    assert_eq!(meta["role_name"], Value::Null);
     assert!(meta.get("plan_enabled").is_none());
 }
 

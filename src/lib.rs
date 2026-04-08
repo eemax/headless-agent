@@ -7,6 +7,7 @@ pub mod config;
 pub mod error;
 pub mod exit;
 pub mod prompt;
+pub mod prompt_def;
 pub mod provider;
 pub mod role_def;
 pub mod session;

@@ -135,12 +135,20 @@ impl HeadlessRoots {
         self.resolve_named("roles", name)
     }
 
+    pub fn resolve_prompt(&self, name: &str) -> Result<PathBuf, AppError> {
+        self.resolve_named("prompts", name)
+    }
+
     pub fn list_agents(&self) -> Result<Vec<String>, AppError> {
         self.list_named("agents")
     }
 
     pub fn list_roles(&self) -> Result<Vec<String>, AppError> {
         self.list_named("roles")
+    }
+
+    pub fn list_prompts(&self) -> Result<Vec<String>, AppError> {
+        self.list_named("prompts")
     }
 
     fn resolve_named(&self, dir: &str, name: &str) -> Result<PathBuf, AppError> {
@@ -192,7 +200,10 @@ impl HeadlessRoots {
 }
 
 fn has_headless_layout(root: &Path) -> bool {
-    root.join("agents").exists() || root.join("roles").exists() || root.join("config.toml").exists()
+    root.join("agents").exists()
+        || root.join("roles").exists()
+        || root.join("prompts").exists()
+        || root.join("config.toml").exists()
 }
 
 pub fn resolve_relative(base_file: &Path, value: &str) -> Result<PathBuf, AppError> {
@@ -216,4 +227,29 @@ pub fn expand_tilde(input: &str) -> Result<PathBuf, AppError> {
             .ok_or_else(|| AppError::Config("unable to resolve home directory".to_string()));
     }
     Ok(PathBuf::from(input))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use tempfile::TempDir;
+
+    use super::has_headless_layout;
+
+    #[test]
+    fn prompt_directory_counts_as_a_headless_layout() {
+        let temp = TempDir::new().expect("tempdir");
+        fs::create_dir(temp.path().join("prompts")).expect("prompts dir");
+
+        assert!(has_headless_layout(temp.path()));
+    }
+
+    #[test]
+    fn unrelated_directory_does_not_count_as_a_headless_layout() {
+        let temp = TempDir::new().expect("tempdir");
+        fs::create_dir(temp.path().join("notes")).expect("notes dir");
+
+        assert!(!has_headless_layout(temp.path()));
+    }
 }
