@@ -17,6 +17,7 @@ Output only the final assistant response. Avoid conversational filler.
 Tool output limits:
 - grep returns at most 1000 matches. If truncated, narrow the pattern or search a subdirectory.
 - glob returns at most 10000 paths. Use a more specific pattern if truncated.
+- glob and grep respect repo and global ignore files, so entries hidden by a global gitignore may not appear.
 - read_file returns at most 2000 lines by default. Use start_line/end_line for large files.
 - bash stdout/stderr are each capped. Pipe through head/tail/grep for large output.
 - When a tool response includes "truncated": true, refine your query rather than retrying the same call.

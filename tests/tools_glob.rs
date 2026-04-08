@@ -132,6 +132,39 @@ fn glob_respects_ignore_files_when_pattern_targets_ignored_root() {
 }
 
 #[test]
+fn glob_dot_slash_patterns_match_like_plain_relative_patterns() {
+    let temp = TempDir::new().expect("tempdir");
+    let cwd = temp.path();
+    let run_dir = cwd.join("run");
+    fs::create_dir_all(cwd.join("src")).expect("src dir");
+    fs::create_dir_all(&run_dir).expect("run dir");
+    fs::write(cwd.join("src/main.txt"), "x").expect("src file");
+
+    let config = test_config(cwd);
+    let run_control = new_run_control(&config, Duration::from_secs(5));
+    let context = ToolContext::new(
+        cwd,
+        &run_dir,
+        &config,
+        false,
+        &config.shell,
+        &config.shell_args,
+        &run_control,
+    );
+    let execution = execute_tool(
+        &context,
+        &["glob".to_string()],
+        "glob",
+        &json!({ "pattern": "./src/*.txt" }),
+    )
+    .expect("glob execution");
+    let payload: Value = serde_json::from_str(&execution.content).expect("json");
+    let matches = payload["matches"].as_array().expect("matches array");
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0], "src/main.txt");
+}
+
+#[test]
 fn glob_explicit_git_pattern_returns_no_matches() {
     let temp = TempDir::new().expect("tempdir");
     let cwd = temp.path();
@@ -158,6 +191,38 @@ fn glob_explicit_git_pattern_returns_no_matches() {
         &["glob".to_string()],
         "glob",
         &json!({ "pattern": ".git/**/*" }),
+    )
+    .expect("glob execution");
+    let payload: Value = serde_json::from_str(&execution.content).expect("json");
+    let matches = payload["matches"].as_array().expect("matches array");
+    assert!(matches.is_empty());
+}
+
+#[test]
+fn glob_excludes_git_file_entries() {
+    let temp = TempDir::new().expect("tempdir");
+    let cwd = temp.path();
+    let run_dir = cwd.join("run");
+    fs::create_dir_all(&run_dir).expect("run dir");
+
+    fs::write(cwd.join(".git"), "gitdir: /tmp/worktree\n").expect(".git file");
+
+    let config = test_config(cwd);
+    let run_control = new_run_control(&config, Duration::from_secs(5));
+    let context = ToolContext::new(
+        cwd,
+        &run_dir,
+        &config,
+        false,
+        &config.shell,
+        &config.shell_args,
+        &run_control,
+    );
+    let execution = execute_tool(
+        &context,
+        &["glob".to_string()],
+        "glob",
+        &json!({ "pattern": ".git" }),
     )
     .expect("glob execution");
     let payload: Value = serde_json::from_str(&execution.content).expect("json");

@@ -149,6 +149,75 @@ fn grep_respects_repo_ignore_rules() {
 }
 
 #[test]
+fn grep_explicit_ignored_root_returns_no_matches() {
+    let temp = TempDir::new().expect("tempdir");
+    let cwd = temp.path();
+    let run_dir = cwd.join("run");
+    fs::create_dir_all(&run_dir).expect("run dir");
+
+    fs::write(cwd.join(".ignore"), "generated/\n").expect(".ignore");
+    fs::create_dir_all(cwd.join("generated")).expect("generated dir");
+    fs::write(cwd.join("generated/file.txt"), "findme").expect("generated file");
+
+    let config = test_config(cwd);
+    let run_control = new_run_control(&config, Duration::from_secs(5));
+    let context = ToolContext::new(
+        cwd,
+        &run_dir,
+        &config,
+        false,
+        &config.shell,
+        &config.shell_args,
+        &run_control,
+    );
+    let execution = execute_tool(
+        &context,
+        &["grep".to_string()],
+        "grep",
+        &json!({ "pattern": "findme", "path": "generated" }),
+    )
+    .expect("grep execution");
+    let payload: Value = serde_json::from_str(&execution.content).expect("json");
+    let matches = payload["matches"].as_array().expect("matches array");
+    assert!(matches.is_empty());
+    assert_eq!(payload["files_scanned"], 0);
+}
+
+#[test]
+fn grep_explicit_git_path_returns_no_matches() {
+    let temp = TempDir::new().expect("tempdir");
+    let cwd = temp.path();
+    let run_dir = cwd.join("run");
+    fs::create_dir_all(&run_dir).expect("run dir");
+
+    fs::create_dir_all(cwd.join(".git")).expect(".git dir");
+    fs::write(cwd.join(".git/config"), "findme").expect("git file");
+
+    let config = test_config(cwd);
+    let run_control = new_run_control(&config, Duration::from_secs(5));
+    let context = ToolContext::new(
+        cwd,
+        &run_dir,
+        &config,
+        false,
+        &config.shell,
+        &config.shell_args,
+        &run_control,
+    );
+    let execution = execute_tool(
+        &context,
+        &["grep".to_string()],
+        "grep",
+        &json!({ "pattern": "findme", "path": ".git" }),
+    )
+    .expect("grep execution");
+    let payload: Value = serde_json::from_str(&execution.content).expect("json");
+    let matches = payload["matches"].as_array().expect("matches array");
+    assert!(matches.is_empty());
+    assert_eq!(payload["files_scanned"], 0);
+}
+
+#[test]
 fn grep_truncation_includes_actionable_metadata() {
     let temp = TempDir::new().expect("tempdir");
     let cwd = temp.path();

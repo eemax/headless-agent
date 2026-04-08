@@ -1,6 +1,6 @@
 use std::{
     io::{self, BufRead, BufReader, Read},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     process::{Command, Stdio},
     sync::{
         Arc,
@@ -11,6 +11,7 @@ use std::{
 };
 
 use base64::Engine;
+use ignore::WalkBuilder;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -24,7 +25,7 @@ const MATCH_LIMIT: usize = 1000;
 pub fn grep_spec() -> crate::tools::ToolSpec {
     crate::tools::ToolSpec {
         name: "grep",
-        description: "Search text files with ripgrep regex semantics. Returns up to 1000 matches. Searches hidden files, respects ignore files, and excludes .git. If truncated, narrow with a more specific pattern or search a subdirectory.",
+        description: "Search text files with ripgrep regex semantics. Returns up to 1000 matches. Searches hidden files, respects repo and global ignore files, and excludes .git. If truncated, narrow with a more specific pattern or search a subdirectory.",
         parameters: json!({
             "type": "object",
             "properties": {
@@ -45,6 +46,14 @@ pub fn grep_search(context: &ToolContext<'_>, arguments: &Value) -> Result<Value
             "search path does not exist: {}",
             root.display()
         )));
+    }
+    if search_root_is_excluded(context.cwd, &root) {
+        return Ok(json!({
+            "ok": true,
+            "matches": [],
+            "files_scanned": 0,
+            "truncated": false,
+        }));
     }
     let timeout = context.remaining_budget()?;
 
@@ -163,6 +172,63 @@ pub fn grep_search(context: &ToolContext<'_>, arguments: &Value) -> Result<Value
         ));
     }
     Ok(result)
+}
+
+fn search_root_is_excluded(cwd: &Path, root: &Path) -> bool {
+    if path_has_component(root, ".git") {
+        return true;
+    }
+    if root == cwd {
+        return false;
+    }
+
+    let Ok(relative) = root.strip_prefix(cwd) else {
+        return false;
+    };
+    if relative
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return false;
+    }
+
+    let depth = relative.components().count();
+    if depth == 0 {
+        return false;
+    }
+
+    let target = root.to_path_buf();
+    let filter_target = target.clone();
+    let mut builder = WalkBuilder::new(cwd);
+    configure_ignore_walk(&mut builder, cwd);
+    builder.max_depth(Some(depth));
+    builder.filter_entry(move |entry| filter_target.starts_with(entry.path()));
+
+    let mut saw_error = false;
+    for entry in builder.build() {
+        match entry {
+            Ok(entry) if entry.path() == target => return false,
+            Ok(_) => {}
+            Err(_) => saw_error = true,
+        }
+    }
+    !saw_error
+}
+
+fn configure_ignore_walk(builder: &mut WalkBuilder, cwd: &Path) {
+    builder.current_dir(cwd);
+    builder.hidden(false);
+    builder.parents(true);
+    builder.ignore(true);
+    builder.git_ignore(true);
+    builder.git_global(true);
+    builder.git_exclude(true);
+    builder.require_git(false);
+}
+
+fn path_has_component(path: &Path, name: &str) -> bool {
+    path.components()
+        .any(|component| component.as_os_str() == name)
 }
 
 #[derive(Debug)]

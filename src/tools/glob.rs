@@ -23,7 +23,7 @@ struct GlobPlan {
 pub fn glob_spec() -> crate::tools::ToolSpec {
     crate::tools::ToolSpec {
         name: "glob",
-        description: "Find files matching a glob pattern. Returns up to 10000 results. Searches hidden files, respects ignore files, and excludes .git.",
+        description: "Find files matching a glob pattern. Returns up to 10000 results. Searches hidden files, respects repo and global ignore files, and excludes .git.",
         parameters: json!({
             "type": "object",
             "properties": {
@@ -36,7 +36,7 @@ pub fn glob_spec() -> crate::tools::ToolSpec {
 
 pub fn glob_search(context: &ToolContext<'_>, arguments: &Value) -> Result<Value, AppError> {
     let _ = context.remaining_budget()?;
-    let pattern = require_string(arguments, "pattern")?;
+    let pattern = normalize_pattern(&require_string(arguments, "pattern")?);
     let plan = build_plan(context.cwd, &pattern);
     let matcher = GlobBuilder::new(&plan.matcher_pattern)
         .literal_separator(true)
@@ -142,7 +142,10 @@ fn absolute_base_root(pattern: &Path) -> PathBuf {
 fn search_root(base_root: &Path, pattern: &Path) -> PathBuf {
     let mut root = base_root.to_path_buf();
     for component in pattern.components() {
-        if matches!(component, Component::Prefix(_) | Component::RootDir) {
+        if matches!(
+            component,
+            Component::Prefix(_) | Component::RootDir | Component::CurDir
+        ) {
             continue;
         }
         let text = component.as_os_str().to_string_lossy();
@@ -165,7 +168,10 @@ fn remaining_components(pattern: &Path) -> usize {
     let mut remaining = 0usize;
 
     for component in pattern.components() {
-        if matches!(component, Component::Prefix(_) | Component::RootDir) {
+        if matches!(
+            component,
+            Component::Prefix(_) | Component::RootDir | Component::CurDir
+        ) {
             continue;
         }
         let has_meta = component_has_glob_meta(&component.as_os_str().to_string_lossy());
@@ -197,14 +203,35 @@ fn match_candidate_path<'a>(path: &'a Path, cwd: &'a Path, relative: bool) -> &'
 }
 
 fn should_visit_entry(entry: &DirEntry, subtree_root: &Path) -> bool {
-    !is_git_dir(entry) && is_in_subtree(entry.path(), subtree_root)
+    !path_has_component(entry.path(), ".git") && is_in_subtree(entry.path(), subtree_root)
 }
 
-fn is_git_dir(entry: &DirEntry) -> bool {
-    entry
-        .file_type()
-        .is_some_and(|file_type| file_type.is_dir())
-        && entry.file_name().to_str() == Some(".git")
+fn normalize_pattern(pattern: &str) -> String {
+    let pattern_path = Path::new(pattern);
+    if pattern_path.is_absolute() {
+        return pattern.to_string();
+    }
+
+    let mut components = pattern_path.components().peekable();
+    while matches!(components.peek(), Some(Component::CurDir)) {
+        components.next();
+    }
+
+    let mut normalized = PathBuf::new();
+    for component in components {
+        normalized.push(component.as_os_str());
+    }
+
+    if normalized.as_os_str().is_empty() {
+        ".".to_string()
+    } else {
+        normalized.to_string_lossy().to_string()
+    }
+}
+
+fn path_has_component(path: &Path, name: &str) -> bool {
+    path.components()
+        .any(|component| component.as_os_str() == name)
 }
 
 fn is_in_subtree(path: &Path, subtree_root: &Path) -> bool {
