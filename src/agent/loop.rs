@@ -7,6 +7,7 @@ use crate::{
     artifact::store_text_artifact,
     config::GlobalConfig,
     error::AppError,
+    progress::ProgressReporter,
     provider::openrouter::{ChatRequest, OpenRouterClient},
     session::SessionStore,
     tools::{RunControl, ToolContext, builtin_specs, execute_tool, tool_behavior},
@@ -47,7 +48,10 @@ struct PartialOutcomeInput {
 
 const TOOL_RETRY_CAP: usize = 2;
 
-pub fn run_agent_loop(context: AgentRunContext) -> Result<RunOutcome, AppError> {
+pub fn run_agent_loop(
+    context: AgentRunContext,
+    progress: &mut ProgressReporter<'_>,
+) -> Result<RunOutcome, AppError> {
     let base_url = context
         .agent
         .def
@@ -152,6 +156,12 @@ pub fn run_agent_loop(context: AgentRunContext) -> Result<RunOutcome, AppError> 
             reasoning: response.reasoning.clone(),
             reasoning_details: response.reasoning_details.clone(),
         });
+        progress.emit_provider_step(
+            step,
+            response.reasoning.as_ref(),
+            response.reasoning_details.as_ref(),
+            &response.tool_calls,
+        )?;
         if let Err(err) = run_control.remaining_budget() {
             return Ok(partial_outcome(PartialOutcomeInput {
                 records,

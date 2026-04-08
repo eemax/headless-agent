@@ -16,6 +16,7 @@ use crate::{
     cli::{self, Command, RunArgs, SessionArg},
     config::{GlobalConfig, HeadlessRoots},
     error::AppError,
+    progress::{BufferedStderrSink, ProgressReporter, StderrSink, WriterStderrSink},
     prompt::assemble_prompt,
     prompt_def::LoadedPrompt,
     role_def::LoadedRole,
@@ -41,6 +42,22 @@ struct PersistedRunOutcome<'a> {
 
 pub fn run_from_env(interrupted: Arc<AtomicBool>) -> Result<(), AppError> {
     let command = cli::parse_from_env()?;
+    if matches!(&command, Command::Run(args) if args.verbose) {
+        let (roots, config, store) = prepare_runtime()?;
+        let mut stderr = io::stderr().lock();
+        let mut stderr_sink = WriterStderrSink::new(&mut stderr);
+        let stdout = match command {
+            Command::Run(args) => {
+                run_prompt(args, roots, config, store, interrupted, &mut stderr_sink)?
+            }
+            _ => unreachable!("verbose live sink is only used for run commands"),
+        };
+        let mut stdout_handle = io::stdout().lock();
+        stdout_handle.write_all(stdout.as_bytes())?;
+        stdout_handle.flush()?;
+        return Ok(());
+    }
+
     let output = run(command, interrupted)?;
     let mut stderr = io::stderr().lock();
     for line in output.stderr {
@@ -74,11 +91,25 @@ struct CommitInput<'a> {
 }
 
 pub fn run(command: Command, interrupted: Arc<AtomicBool>) -> Result<AppOutput, AppError> {
+    let (roots, config, store) = prepare_runtime()?;
+    run_with_runtime(command, roots, config, store, interrupted)
+}
+
+fn prepare_runtime() -> Result<(HeadlessRoots, GlobalConfig, SessionStore), AppError> {
     let roots = HeadlessRoots::discover();
     let config = GlobalConfig::load(&roots)?;
     let store = SessionStore::new(&config);
     store.ensure_root()?;
+    Ok((roots, config, store))
+}
 
+fn run_with_runtime(
+    command: Command,
+    roots: HeadlessRoots,
+    config: GlobalConfig,
+    store: SessionStore,
+    interrupted: Arc<AtomicBool>,
+) -> Result<AppOutput, AppError> {
     match command {
         Command::Version => Ok(AppOutput {
             stdout: format!("{}\n", env!("CARGO_PKG_VERSION")),
@@ -153,7 +184,14 @@ pub fn run(command: Command, interrupted: Arc<AtomicBool>) -> Result<AppOutput, 
             store.stop_session(&id)?;
             Ok(AppOutput::default())
         }
-        Command::Run(args) => run_prompt(args, roots, config, store, interrupted),
+        Command::Run(args) => {
+            let mut stderr_sink = BufferedStderrSink::default();
+            let stdout = run_prompt(args, roots, config, store, interrupted, &mut stderr_sink)?;
+            Ok(AppOutput {
+                stdout,
+                stderr: stderr_sink.into_lines(),
+            })
+        }
     }
 }
 
@@ -163,15 +201,16 @@ fn run_prompt(
     config: GlobalConfig,
     store: SessionStore,
     interrupted: Arc<AtomicBool>,
-) -> Result<AppOutput, AppError> {
-    let mut stderr = Vec::new();
+    stderr_sink: &mut dyn StderrSink,
+) -> Result<String, AppError> {
+    let mut progress = ProgressReporter::new(args.verbose, stderr_sink);
     let current_dir = env::current_dir()
         .map_err(|err| AppError::Runtime(format!("failed to read current directory: {err}")))?;
 
     let (session_meta, session_id, created_new_session) = match &args.session {
         SessionArg::New => {
             let created = store.create_session()?;
-            stderr.push(format!("created session {}", created.session_id));
+            progress.emit_line(format!("created session {}", created.session_id))?;
             (created.clone(), created.session_id.clone(), true)
         }
         SessionArg::Last => {
@@ -180,10 +219,10 @@ fn run_prompt(
             match args.fork {
                 true => {
                     let forked = store.fork_session(&resolved_id)?;
-                    stderr.push(format!(
+                    progress.emit_line(format!(
                         "forked session {} from {}",
                         forked.session_id, resolved_id
-                    ));
+                    ))?;
                     (forked.clone(), forked.session_id.clone(), false)
                 }
                 false => (resolved, resolved_id, false),
@@ -192,7 +231,7 @@ fn run_prompt(
         SessionArg::Existing(id) => match args.fork {
             true => {
                 let forked = store.fork_session(id)?;
-                stderr.push(format!("forked session {} from {}", forked.session_id, id));
+                progress.emit_line(format!("forked session {} from {}", forked.session_id, id))?;
                 (forked.clone(), forked.session_id.clone(), false)
             }
             false => {
@@ -314,7 +353,7 @@ fn run_prompt(
     let RunOutcome {
         result,
         execution_guard,
-    } = run_agent_loop(run_context)?;
+    } = run_agent_loop(run_context, &mut progress)?;
     let final_text = result.final_text.clone();
     let termination = result.termination.clone();
     persist_run_trace(&run_dir, &user_records, &result)?;
@@ -334,25 +373,22 @@ fn run_prompt(
     }
 
     if let Some(note) = role_change_note {
-        stderr.push(note);
+        progress.emit_line(note)?;
     }
-    if args.verbose || args.debug {
-        stderr.push(format!(
+    if args.debug {
+        progress.emit_line(format!(
             "session={} model={} effort={} cwd={}",
             session_id,
             model,
             effort,
             effective_cwd.display()
-        ));
+        ))?;
         if created_new_session {
-            stderr.push("new session initialized".to_string());
+            progress.emit_line("new session initialized")?;
         }
     }
 
-    Ok(AppOutput {
-        stdout: final_text,
-        stderr,
-    })
+    Ok(final_text)
 }
 
 fn build_commit(

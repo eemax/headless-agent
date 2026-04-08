@@ -6,6 +6,7 @@ pub mod cli;
 pub mod config;
 pub mod error;
 pub mod exit;
+pub mod progress;
 pub mod prompt;
 pub mod prompt_def;
 pub mod provider;
