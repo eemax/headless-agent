@@ -7,7 +7,10 @@ use std::{fmt, str::FromStr};
 use serde::{Deserialize, Serialize};
 
 pub use message::{ArtifactRef, MessageRole, PromptMessage, ToolCallRecord, TranscriptRecord};
-pub use result::{LoopTermination, RunArtifacts, RunOutcome, RunResult, ToolExecution};
+pub use result::{
+    LoopTermination, ProviderStepRecord, ProviderTokenUsage, ProviderUsageSummary, RunArtifacts,
+    RunOutcome, RunResult, ToolExecution,
+};
 pub use session::SessionMeta;
 
 use crate::error::AppError;

@@ -11,8 +11,8 @@ use crate::{
     session::SessionStore,
     tools::{RunControl, ToolContext, builtin_specs, execute_tool, tool_behavior},
     types::{
-        LoopTermination, MessageRole, PromptMessage, RunArtifacts, RunOutcome, RunResult,
-        ToolCallRecord, ToolExecution, TranscriptRecord,
+        LoopTermination, MessageRole, PromptMessage, ProviderStepRecord, ProviderUsageSummary,
+        RunArtifacts, RunOutcome, RunResult, ToolCallRecord, ToolExecution, TranscriptRecord,
     },
 };
 
@@ -66,6 +66,8 @@ pub fn run_agent_loop(context: AgentRunContext) -> Result<RunOutcome, AppError> 
     let mut prompt_messages = context.prompt_messages.clone();
     let mut records = Vec::new();
     let mut artifacts = RunArtifacts::default();
+    let mut provider_steps = Vec::new();
+    let mut provider_usage_summary = ProviderUsageSummary::default();
     let mut total_prompt_tokens: usize = 0;
     let mut total_completion_tokens: usize = 0;
 
@@ -77,6 +79,8 @@ pub fn run_agent_loop(context: AgentRunContext) -> Result<RunOutcome, AppError> 
                 return Ok(partial_outcome(
                     records,
                     artifacts,
+                    provider_steps,
+                    provider_usage_summary,
                     LoopTermination::Timeout(err.to_string()),
                     run_control,
                     total_prompt_tokens,
@@ -98,6 +102,8 @@ pub fn run_agent_loop(context: AgentRunContext) -> Result<RunOutcome, AppError> 
                 return Ok(partial_outcome(
                     records,
                     artifacts,
+                    provider_steps,
+                    provider_usage_summary,
                     LoopTermination::Timeout(msg),
                     run_control,
                     total_prompt_tokens,
@@ -108,6 +114,8 @@ pub fn run_agent_loop(context: AgentRunContext) -> Result<RunOutcome, AppError> 
                 return Ok(partial_outcome(
                     records,
                     artifacts,
+                    provider_steps,
+                    provider_usage_summary,
                     LoopTermination::Error(err.to_string()),
                     run_control,
                     total_prompt_tokens,
@@ -120,10 +128,25 @@ pub fn run_agent_loop(context: AgentRunContext) -> Result<RunOutcome, AppError> 
             total_prompt_tokens += usage.prompt_tokens;
             total_completion_tokens += usage.completion_tokens;
         }
+        provider_usage_summary.observe_step(response.usage.as_ref());
+        provider_steps.push(ProviderStepRecord {
+            v: 1,
+            ts: crate::session::now_rfc3339()?,
+            step,
+            model: context.model.clone(),
+            effort: context.effort,
+            tool_calls: response.tool_calls.clone(),
+            usage: response.usage.clone(),
+            usage_raw: response.usage_raw.clone(),
+            reasoning: response.reasoning.clone(),
+            reasoning_details: response.reasoning_details.clone(),
+        });
         if let Err(err) = run_control.remaining_budget() {
             return Ok(partial_outcome(
                 records,
                 artifacts,
+                provider_steps,
+                provider_usage_summary,
                 LoopTermination::Timeout(err.to_string()),
                 run_control,
                 total_prompt_tokens,
@@ -156,6 +179,8 @@ pub fn run_agent_loop(context: AgentRunContext) -> Result<RunOutcome, AppError> 
             name: None,
             tool_call_id: None,
             tool_calls: assistant_record.tool_calls.clone().unwrap_or_default(),
+            reasoning: response.reasoning.clone(),
+            reasoning_details: response.reasoning_details.clone(),
         });
 
         if response.tool_calls.is_empty() {
@@ -164,6 +189,8 @@ pub fn run_agent_loop(context: AgentRunContext) -> Result<RunOutcome, AppError> 
                     final_text: response.content.unwrap_or_default(),
                     records,
                     artifacts,
+                    provider_steps,
+                    provider_usage_summary,
                     termination: LoopTermination::Complete,
                     total_prompt_tokens,
                     total_completion_tokens,
@@ -183,6 +210,8 @@ pub fn run_agent_loop(context: AgentRunContext) -> Result<RunOutcome, AppError> 
                     return Ok(partial_outcome(
                         records,
                         artifacts,
+                        provider_steps,
+                        provider_usage_summary,
                         LoopTermination::Timeout(msg),
                         run_control,
                         total_prompt_tokens,
@@ -193,6 +222,8 @@ pub fn run_agent_loop(context: AgentRunContext) -> Result<RunOutcome, AppError> 
                     return Ok(partial_outcome(
                         records,
                         artifacts,
+                        provider_steps,
+                        provider_usage_summary,
                         LoopTermination::Error(err.to_string()),
                         run_control,
                         total_prompt_tokens,
@@ -222,6 +253,8 @@ pub fn run_agent_loop(context: AgentRunContext) -> Result<RunOutcome, AppError> 
                 name: tool_record.name.clone(),
                 tool_call_id: tool_record.tool_call_id.clone(),
                 tool_calls: Vec::new(),
+                reasoning: None,
+                reasoning_details: None,
             });
         }
         step += 1;
@@ -231,6 +264,8 @@ pub fn run_agent_loop(context: AgentRunContext) -> Result<RunOutcome, AppError> 
 fn partial_outcome(
     records: Vec<TranscriptRecord>,
     artifacts: RunArtifacts,
+    provider_steps: Vec<ProviderStepRecord>,
+    provider_usage_summary: ProviderUsageSummary,
     termination: LoopTermination,
     run_control: RunControl,
     prompt_tokens: usize,
@@ -252,6 +287,8 @@ fn partial_outcome(
             final_text,
             records,
             artifacts,
+            provider_steps,
+            provider_usage_summary,
             termination,
             total_prompt_tokens: prompt_tokens,
             total_completion_tokens: completion_tokens,

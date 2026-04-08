@@ -30,6 +30,8 @@ pub fn assemble_prompt(
         name: None,
         tool_call_id: None,
         tool_calls: Vec::new(),
+        reasoning: None,
+        reasoning_details: None,
     });
 
     // Session history is replay-oriented rather than audit-oriented:
@@ -43,6 +45,8 @@ pub fn assemble_prompt(
                     name: None,
                     tool_call_id: None,
                     tool_calls: Vec::new(),
+                    reasoning: None,
+                    reasoning_details: None,
                 });
             }
             MessageRole::Assistant if record.tool_calls.as_ref().is_none_or(|tc| tc.is_empty()) => {
@@ -52,6 +56,8 @@ pub fn assemble_prompt(
                     name: None,
                     tool_call_id: None,
                     tool_calls: Vec::new(),
+                    reasoning: None,
+                    reasoning_details: None,
                 });
             }
             _ => {}
@@ -66,6 +72,8 @@ pub fn assemble_prompt(
         name: None,
         tool_call_id: None,
         tool_calls: Vec::new(),
+        reasoning: None,
+        reasoning_details: None,
     });
 
     if let Some(stdin) = stdin {
@@ -75,6 +83,8 @@ pub fn assemble_prompt(
             name: None,
             tool_call_id: None,
             tool_calls: Vec::new(),
+            reasoning: None,
+            reasoning_details: None,
         });
     }
 

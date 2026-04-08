@@ -34,6 +34,8 @@ pub struct PromptMessage {
     pub name: Option<String>,
     pub tool_call_id: Option<String>,
     pub tool_calls: Vec<ToolCallRecord>,
+    pub reasoning: Option<Value>,
+    pub reasoning_details: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

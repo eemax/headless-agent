@@ -21,7 +21,10 @@ use crate::{
     role_def::LoadedRole,
     session::{self, SessionCommit, SessionStore, new_id, now_rfc3339},
     tools::{web_fetch, web_search},
-    types::{LoopTermination, MessageRole, RunOutcome, RunResult, SessionMeta, TranscriptRecord},
+    types::{
+        LoopTermination, MessageRole, ProviderUsageSummary, RunOutcome, RunResult, SessionMeta,
+        TranscriptRecord,
+    },
 };
 
 #[derive(Debug, Serialize)]
@@ -32,6 +35,7 @@ struct PersistedRunOutcome<'a> {
     final_text: &'a str,
     total_prompt_tokens: usize,
     total_completion_tokens: usize,
+    provider_usage_summary: &'a ProviderUsageSummary,
     artifacts: &'a [crate::types::ArtifactRef],
 }
 
@@ -393,6 +397,7 @@ fn persist_run_trace(
     let mut records = user_records.to_vec();
     records.extend(result.records.iter().cloned());
     session::jsonl::append_records(&run_dir.join("transcript.jsonl"), &records)?;
+    session::jsonl::append_records(&run_dir.join("provider.jsonl"), &result.provider_steps)?;
 
     let outcome = PersistedRunOutcome {
         termination: termination_kind(&result.termination),
@@ -400,6 +405,7 @@ fn persist_run_trace(
         final_text: &result.final_text,
         total_prompt_tokens: result.total_prompt_tokens,
         total_completion_tokens: result.total_completion_tokens,
+        provider_usage_summary: &result.provider_usage_summary,
         artifacts: &result.artifacts.paths,
     };
     fs::write(

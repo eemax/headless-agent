@@ -42,6 +42,8 @@ fn openrouter_request_includes_reasoning_and_tool_definitions() {
                     name: None,
                     tool_call_id: None,
                     tool_calls: Vec::new(),
+                    reasoning: None,
+                    reasoning_details: None,
                 },
                 PromptMessage {
                     role: MessageRole::User,
@@ -49,6 +51,8 @@ fn openrouter_request_includes_reasoning_and_tool_definitions() {
                     name: None,
                     tool_call_id: None,
                     tool_calls: Vec::new(),
+                    reasoning: None,
+                    reasoning_details: None,
                 },
             ],
             tools: &[bash_spec()],
@@ -66,6 +70,141 @@ fn openrouter_request_includes_reasoning_and_tool_definitions() {
     assert_eq!(request["parallel_tool_calls"], false);
     assert_eq!(request["reasoning"]["effort"], "high");
     assert_eq!(request["tools"][0]["function"]["name"], "bash");
+}
+
+#[test]
+fn openrouter_parses_usage_cache_and_reasoning_metadata() {
+    let server = FakeOpenRouter::start(vec![ResponseSpec::json(json!({
+        "choices": [
+            {
+                "message": {
+                    "content": "ok",
+                    "reasoning": {
+                        "signature": "opaque-reasoning"
+                    },
+                    "reasoning_details": [
+                        {
+                            "type": "reasoning.summary",
+                            "text": "inspect note"
+                        }
+                    ]
+                }
+            }
+        ],
+        "usage": {
+            "prompt_tokens": 42,
+            "completion_tokens": 10,
+            "total_tokens": 52,
+            "prompt_tokens_details": {
+                "cached_tokens": 21,
+                "cache_write_tokens": 4
+            },
+            "completion_tokens_details": {
+                "reasoning_tokens": 7
+            }
+        }
+    }))]);
+    let client = OpenRouterClient::new(server.url(), "test-key".to_string());
+    let response = client
+        .send_chat(ChatRequest {
+            session_id: "session-1",
+            model: "openai/gpt-4.1",
+            effort: Effort::Medium,
+            messages: &[PromptMessage {
+                role: MessageRole::User,
+                content: Some("hello".to_string()),
+                name: None,
+                tool_call_id: None,
+                tool_calls: Vec::new(),
+                reasoning: None,
+                reasoning_details: None,
+            }],
+            tools: &[],
+            max_output_tokens: 128,
+            timeout: Duration::from_secs(5),
+        })
+        .expect("provider response");
+
+    let usage = response.usage.expect("usage should be present");
+    assert_eq!(usage.prompt_tokens, 42);
+    assert_eq!(usage.completion_tokens, 10);
+    assert_eq!(usage.total_tokens, 52);
+    assert_eq!(usage.cached_tokens, Some(21));
+    assert_eq!(usage.cache_write_tokens, Some(4));
+    assert_eq!(usage.reasoning_tokens, Some(7));
+    assert_eq!(
+        response
+            .usage_raw
+            .expect("raw usage should be present")["prompt_tokens_details"]["cached_tokens"],
+        21
+    );
+    assert_eq!(
+        response.reasoning.expect("reasoning should be present")["signature"],
+        "opaque-reasoning"
+    );
+    assert_eq!(
+        response
+            .reasoning_details
+            .expect("reasoning details should be present")[0]["type"],
+        "reasoning.summary"
+    );
+}
+
+#[test]
+fn assistant_reasoning_fields_are_sent_when_present() {
+    let server = FakeOpenRouter::start(vec![ResponseSpec::json(json!({
+        "choices": [
+            {
+                "message": {
+                    "content": "ok"
+                }
+            }
+        ]
+    }))]);
+    let client = OpenRouterClient::new(server.url(), "test-key".to_string());
+    client
+        .send_chat(ChatRequest {
+            session_id: "session-1",
+            model: "openai/gpt-4.1",
+            effort: Effort::Low,
+            messages: &[
+                PromptMessage {
+                    role: MessageRole::User,
+                    content: Some("hello".to_string()),
+                    name: None,
+                    tool_call_id: None,
+                    tool_calls: Vec::new(),
+                    reasoning: None,
+                    reasoning_details: None,
+                },
+                PromptMessage {
+                    role: MessageRole::Assistant,
+                    content: Some("I should inspect the note".to_string()),
+                    name: None,
+                    tool_call_id: None,
+                    tool_calls: Vec::new(),
+                    reasoning: Some(json!({
+                        "signature": "opaque-reasoning"
+                    })),
+                    reasoning_details: Some(json!([
+                        {
+                            "type": "reasoning.summary",
+                            "text": "inspect note"
+                        }
+                    ])),
+                },
+            ],
+            tools: &[],
+            max_output_tokens: 128,
+            timeout: Duration::from_secs(5),
+        })
+        .expect("provider response");
+
+    let requests = server.requests();
+    let assistant = &requests[0]["messages"][1];
+    assert_eq!(assistant["role"], "assistant");
+    assert_eq!(assistant["reasoning"]["signature"], "opaque-reasoning");
+    assert_eq!(assistant["reasoning_details"][0]["type"], "reasoning.summary");
 }
 
 #[test]
@@ -91,6 +230,8 @@ fn openrouter_maps_timeout_status_to_timeout_errors() {
                 name: None,
                 tool_call_id: None,
                 tool_calls: Vec::new(),
+                reasoning: None,
+                reasoning_details: None,
             }],
             tools: &[],
             max_output_tokens: 128,
@@ -127,6 +268,8 @@ fn non_timeout_http_error_maps_to_provider_error() {
                 name: None,
                 tool_call_id: None,
                 tool_calls: Vec::new(),
+                reasoning: None,
+                reasoning_details: None,
             }],
             tools: &[],
             max_output_tokens: 128,
@@ -168,6 +311,8 @@ fn malformed_tool_arguments_fall_back_to_raw_string() {
                 name: None,
                 tool_call_id: None,
                 tool_calls: Vec::new(),
+                reasoning: None,
+                reasoning_details: None,
             }],
             tools: &[bash_spec()],
             max_output_tokens: 128,
@@ -227,6 +372,8 @@ fn interrupted_success_body_maps_to_provider_read_error() {
                 name: None,
                 tool_call_id: None,
                 tool_calls: Vec::new(),
+                reasoning: None,
+                reasoning_details: None,
             }],
             tools: &[],
             max_output_tokens: 128,
@@ -268,6 +415,8 @@ fn openrouter_live_smoke_test() {
                 name: None,
                 tool_call_id: None,
                 tool_calls: Vec::new(),
+                reasoning: None,
+                reasoning_details: None,
             }],
             tools: &[],
             max_output_tokens: 32,

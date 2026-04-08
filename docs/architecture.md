@@ -73,6 +73,7 @@ Current on-disk layout:
     runs/
       <run-id>/
         transcript.jsonl
+        provider.jsonl
         outcome.json
         assistant/
         tool-outputs/
@@ -101,8 +102,9 @@ Not all records from a run are persisted back to the session's `messages.jsonl`.
 - the user prompt(s) are always appended
 - if the run completed normally, the final assistant message (the one without tool calls) is appended
 - all intermediate records — tool-calling assistant messages, tool results, and mid-loop state — live only in the per-run `transcript.jsonl` under `runs/<run-id>/`
+- provider-side metadata such as raw usage, normalized cache and reasoning token counts, and provider reasoning payloads live only in the per-run `provider.jsonl` and `outcome.json`
 
-This means `messages.jsonl` is a compact replay log of user/assistant turns, not a full audit trail. The full audit trail is in the per-run transcript.
+This means `messages.jsonl` is a compact replay log of user/assistant turns, not a full audit trail. The full audit trail is split across the per-run transcript and provider metadata files.
 
 ## Optimistic Concurrency
 
@@ -152,7 +154,9 @@ The provider loop in [src/agent/loop.rs](../src/agent/loop.rs) uses:
 
 Loop behavior:
 - send the current conversation plus built-in tool definitions
+- if an in-run assistant turn already has provider reasoning metadata, resend it on the next provider request in the same run
 - record the assistant message
+- capture per-step provider metadata including raw usage, normalized token counters, and any reasoning payloads
 - if the assistant requested tools, execute them in order
 - append tool results back into the prompt stack
 - stop once the assistant returns content without tool calls

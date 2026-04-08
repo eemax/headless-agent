@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use crate::{
     error::AppError,
     tools::ToolSpec,
-    types::{Effort, MessageRole, PromptMessage, ToolCallRecord},
+    types::{Effort, MessageRole, PromptMessage, ProviderTokenUsage, ToolCallRecord},
 };
 
 const CONNECT_TIMEOUT_CAP: Duration = Duration::from_secs(30);
@@ -18,21 +18,14 @@ pub struct OpenRouterClient {
     agent: ureq::Agent,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct TokenUsage {
-    #[serde(default)]
-    pub prompt_tokens: usize,
-    #[serde(default)]
-    pub completion_tokens: usize,
-    #[serde(default)]
-    pub total_tokens: usize,
-}
-
 #[derive(Debug, Clone)]
 pub struct ProviderResponse {
     pub content: Option<String>,
     pub tool_calls: Vec<ToolCallRecord>,
-    pub usage: Option<TokenUsage>,
+    pub usage: Option<ProviderTokenUsage>,
+    pub usage_raw: Option<Value>,
+    pub reasoning: Option<Value>,
+    pub reasoning_details: Option<Value>,
 }
 
 pub struct ChatRequest<'a> {
@@ -123,9 +116,15 @@ fn send_chat_blocking(
     let body = response
         .into_string()
         .map_err(|error| map_success_body_read_error(status, error))?;
-    let parsed: ChatResponse = serde_json::from_str(&body).map_err(|error| {
+    let raw: Value = serde_json::from_str(&body).map_err(|error| {
         AppError::Provider(format!(
             "OpenRouter returned HTTP {status}, but the response body was not valid JSON: {error}. Body preview: {}",
+            preview_body(&body)
+        ))
+    })?;
+    let parsed: ChatResponse = serde_json::from_value(raw.clone()).map_err(|error| {
+        AppError::Provider(format!(
+            "OpenRouter returned HTTP {status}, but the response body did not match the expected chat schema: {error}. Body preview: {}",
             preview_body(&body)
         ))
     })?;
@@ -153,11 +152,18 @@ fn send_chat_blocking(
             }
         })
         .collect();
+    let usage_raw = raw.get("usage").cloned();
+    let usage = usage_raw.as_ref().and_then(normalize_usage);
+    let reasoning = raw.pointer("/choices/0/message/reasoning").cloned();
+    let reasoning_details = raw.pointer("/choices/0/message/reasoning_details").cloned();
 
     Ok(ProviderResponse {
         content,
         tool_calls,
-        usage: parsed.usage,
+        usage,
+        usage_raw,
+        reasoning,
+        reasoning_details,
     })
 }
 
@@ -198,6 +204,12 @@ fn build_payload(
                             })
                             .collect(),
                     );
+                }
+                if let Some(reasoning) = &message.reasoning {
+                    value["reasoning"] = reasoning.clone();
+                }
+                if let Some(reasoning_details) = &message.reasoning_details {
+                    value["reasoning_details"] = reasoning_details.clone();
                 }
                 value
             }
@@ -304,10 +316,51 @@ fn preview_body(body: &str) -> String {
     }
 }
 
+fn normalize_usage(raw: &Value) -> Option<ProviderTokenUsage> {
+    if !raw.is_object() {
+        return None;
+    }
+
+    Some(ProviderTokenUsage {
+        prompt_tokens: extract_counter(raw, &["prompt_tokens"]).unwrap_or(0),
+        completion_tokens: extract_counter(raw, &["completion_tokens"]).unwrap_or(0),
+        total_tokens: extract_counter(raw, &["total_tokens"]).unwrap_or(0),
+        cached_tokens: raw
+            .get("prompt_tokens_details")
+            .and_then(|details| extract_counter(details, &["cached_tokens", "cache_read_tokens"])),
+        cache_write_tokens: raw.get("prompt_tokens_details").and_then(|details| {
+            extract_counter(
+                details,
+                &[
+                    "cache_write_tokens",
+                    "cache_creation_tokens",
+                    "cache_creation_input_tokens",
+                ],
+            )
+        }),
+        reasoning_tokens: raw
+            .get("completion_tokens_details")
+            .and_then(|details| extract_counter(details, &["reasoning_tokens"])),
+    })
+}
+
+fn extract_counter(value: &Value, keys: &[&str]) -> Option<usize> {
+    keys.iter()
+        .find_map(|key| value.get(*key))
+        .and_then(value_to_usize)
+}
+
+fn value_to_usize(value: &Value) -> Option<usize> {
+    match value {
+        Value::Number(number) => number.as_u64().and_then(|value| usize::try_from(value).ok()),
+        Value::String(text) => text.parse::<usize>().ok(),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct ChatResponse {
     choices: Vec<Choice>,
-    usage: Option<TokenUsage>,
 }
 
 #[derive(Debug, Deserialize)]

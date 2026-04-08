@@ -698,6 +698,8 @@ fn token_usage_is_parsed_from_provider_response() {
                 name: None,
                 tool_call_id: None,
                 tool_calls: Vec::new(),
+                reasoning: None,
+                reasoning_details: None,
             }],
             tools: &[],
             max_output_tokens: 128,
@@ -709,4 +711,127 @@ fn token_usage_is_parsed_from_provider_response() {
     assert_eq!(usage.prompt_tokens, 42);
     assert_eq!(usage.completion_tokens, 10);
     assert_eq!(usage.total_tokens, 52);
+}
+
+#[test]
+fn reasoning_is_resent_within_a_run_and_provider_metadata_is_persisted() {
+    let server = FakeOpenRouter::start(vec![
+        ResponseSpec::json(json!({
+            "choices": [{
+                "message": {
+                    "content": null,
+                    "reasoning": {
+                        "signature": "opaque-reasoning"
+                    },
+                    "reasoning_details": [
+                        {
+                            "type": "reasoning.summary",
+                            "text": "inspect note"
+                        }
+                    ],
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": "{\"path\":\"note.txt\"}"
+                        }
+                    }]
+                }
+            }],
+            "usage": {
+                "prompt_tokens": 40,
+                "completion_tokens": 12,
+                "total_tokens": 52,
+                "prompt_tokens_details": {
+                    "cached_tokens": 11,
+                    "cache_write_tokens": 3
+                },
+                "completion_tokens_details": {
+                    "reasoning_tokens": 5
+                }
+            }
+        })),
+        ResponseSpec::json(json!({
+            "choices": [{
+                "message": {
+                    "content": "done"
+                }
+            }],
+            "usage": {
+                "prompt_tokens": 20,
+                "completion_tokens": 4,
+                "total_tokens": 24
+            }
+        })),
+    ]);
+    let workspace = TestWorkspace::new();
+    workspace.write_repo_assets(&server.url());
+    fs::write(workspace.worktree.join("note.txt"), "hello").expect("seed note");
+
+    let output = workspace
+        .command()
+        .args([
+            "--session",
+            "new",
+            "--agent",
+            "coder",
+            "--cwd",
+            workspace.worktree.to_str().expect("cwd"),
+            "inspect the note",
+        ])
+        .output()
+        .expect("run output");
+
+    assert!(output.status.success());
+    let session_id =
+        common::extract_created_session_id(&String::from_utf8(output.stderr).expect("stderr"));
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[1]["messages"][2]["reasoning"]["signature"],
+        "opaque-reasoning"
+    );
+    assert_eq!(
+        requests[1]["messages"][2]["reasoning_details"][0]["type"],
+        "reasoning.summary"
+    );
+
+    let run_dir = workspace.only_run_dir(&session_id);
+    let provider_trace =
+        fs::read_to_string(run_dir.join("provider.jsonl")).expect("provider trace should exist");
+    let provider_records: Vec<Value> = provider_trace
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("provider json"))
+        .collect();
+    assert_eq!(provider_records.len(), 2);
+    assert_eq!(provider_records[0]["usage"]["cached_tokens"], 11);
+    assert_eq!(provider_records[0]["usage"]["cache_write_tokens"], 3);
+    assert_eq!(provider_records[0]["usage"]["reasoning_tokens"], 5);
+    assert_eq!(provider_records[0]["reasoning"]["signature"], "opaque-reasoning");
+    assert_eq!(
+        provider_records[0]["reasoning_details"][0]["type"],
+        "reasoning.summary"
+    );
+
+    let outcome: Value =
+        serde_json::from_str(&fs::read_to_string(run_dir.join("outcome.json")).expect("outcome"))
+            .expect("outcome json");
+    assert_eq!(outcome["provider_usage_summary"]["steps"], 2);
+    assert_eq!(outcome["provider_usage_summary"]["steps_with_usage"], 2);
+    assert_eq!(outcome["provider_usage_summary"]["prompt_tokens"], 60);
+    assert_eq!(outcome["provider_usage_summary"]["completion_tokens"], 16);
+    assert_eq!(outcome["provider_usage_summary"]["total_tokens"], 76);
+    assert_eq!(outcome["provider_usage_summary"]["cached_tokens"], 11);
+    assert_eq!(outcome["provider_usage_summary"]["cache_write_tokens"], 3);
+    assert_eq!(outcome["provider_usage_summary"]["reasoning_tokens"], 5);
+
+    let messages = fs::read_to_string(
+        workspace
+            .sessions_dir
+            .join(&session_id)
+            .join("messages.jsonl"),
+    )
+    .expect("messages");
+    assert!(!messages.contains("opaque-reasoning"));
+    assert!(!messages.contains("reasoning_details"));
 }
