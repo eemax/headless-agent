@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use globset::GlobBuilder;
 use ignore::{DirEntry, WalkBuilder};
@@ -10,6 +10,15 @@ use crate::{
 };
 
 const RESULT_LIMIT: usize = 10_000;
+
+#[derive(Debug)]
+struct GlobPlan {
+    matcher_pattern: String,
+    walk_root: PathBuf,
+    subtree_root: PathBuf,
+    match_relative_to_cwd: bool,
+    max_depth: Option<usize>,
+}
 
 pub fn glob_spec() -> crate::tools::ToolSpec {
     crate::tools::ToolSpec {
@@ -28,15 +37,14 @@ pub fn glob_spec() -> crate::tools::ToolSpec {
 pub fn glob_search(context: &ToolContext<'_>, arguments: &Value) -> Result<Value, AppError> {
     let _ = context.remaining_budget()?;
     let pattern = require_string(arguments, "pattern")?;
-    let pattern = resolve_pattern(context.cwd, &pattern);
-    let search_root = search_root(Path::new(&pattern));
-    let matcher = GlobBuilder::new(&pattern)
+    let plan = build_plan(context.cwd, &pattern);
+    let matcher = GlobBuilder::new(&plan.matcher_pattern)
         .literal_separator(true)
         .build()
         .map_err(|err| AppError::Tool(format!("invalid glob pattern: {err}")))?
         .compile_matcher();
 
-    if !search_root.exists() {
+    if !plan.subtree_root.exists() {
         return Ok(json!({
             "ok": true,
             "matches": [],
@@ -46,7 +54,8 @@ pub fn glob_search(context: &ToolContext<'_>, arguments: &Value) -> Result<Value
 
     let mut matches = Vec::new();
     let mut truncated = false;
-    let mut builder = WalkBuilder::new(&search_root);
+    let subtree_root = plan.subtree_root.clone();
+    let mut builder = WalkBuilder::new(&plan.walk_root);
     builder.current_dir(context.cwd);
     builder.hidden(false);
     builder.parents(true);
@@ -55,14 +64,16 @@ pub fn glob_search(context: &ToolContext<'_>, arguments: &Value) -> Result<Value
     builder.git_global(true);
     builder.git_exclude(true);
     builder.require_git(false);
+    builder.max_depth(plan.max_depth);
     builder.sort_by_file_path(|left, right| left.cmp(right));
-    builder.filter_entry(not_git_entry);
+    builder.filter_entry(move |entry| should_visit_entry(entry, &subtree_root));
 
     for entry in builder.build() {
         let _ = context.remaining_budget()?;
         let entry = entry.map_err(|err| AppError::Tool(format!("glob error: {err}")))?;
         let path = entry.path();
-        if !matcher.is_match(path) {
+        let candidate = match_candidate_path(path, context.cwd, plan.match_relative_to_cwd);
+        if !matcher.is_match(candidate) {
             continue;
         }
         let display = path
@@ -92,29 +103,55 @@ pub fn glob_search(context: &ToolContext<'_>, arguments: &Value) -> Result<Value
     Ok(result)
 }
 
-fn resolve_pattern(cwd: &Path, pattern: &str) -> String {
-    if Path::new(pattern).is_absolute() {
-        pattern.to_string()
+fn build_plan(cwd: &Path, pattern: &str) -> GlobPlan {
+    let pattern_path = Path::new(pattern);
+    let match_relative_to_cwd = !pattern_path.is_absolute();
+    let base_root = if match_relative_to_cwd {
+        cwd.to_path_buf()
     } else {
-        cwd.join(pattern).to_string_lossy().to_string()
+        absolute_base_root(pattern_path)
+    };
+    let subtree_root = search_root(&base_root, pattern_path);
+    let remaining_components = remaining_components(pattern_path);
+    let max_depth = if pattern.contains("**") {
+        None
+    } else {
+        Some(path_depth(&base_root, &subtree_root) + remaining_components)
+    };
+
+    GlobPlan {
+        matcher_pattern: pattern.to_string(),
+        walk_root: base_root,
+        subtree_root,
+        match_relative_to_cwd,
+        max_depth,
     }
 }
 
-fn search_root(pattern: &Path) -> PathBuf {
+fn absolute_base_root(pattern: &Path) -> PathBuf {
     let mut root = PathBuf::new();
     for component in pattern.components() {
+        root.push(component.as_os_str());
+        if matches!(component, Component::RootDir) {
+            break;
+        }
+    }
+    root
+}
+
+fn search_root(base_root: &Path, pattern: &Path) -> PathBuf {
+    let mut root = base_root.to_path_buf();
+    for component in pattern.components() {
+        if matches!(component, Component::Prefix(_) | Component::RootDir) {
+            continue;
+        }
         let text = component.as_os_str().to_string_lossy();
         if component_has_glob_meta(&text) {
             break;
         }
         root.push(component.as_os_str());
     }
-
-    if root.as_os_str().is_empty() {
-        PathBuf::from(".")
-    } else {
-        root
-    }
+    root
 }
 
 fn component_has_glob_meta(component: &str) -> bool {
@@ -123,6 +160,53 @@ fn component_has_glob_meta(component: &str) -> bool {
         .any(|ch| matches!(ch, '*' | '?' | '[' | '{'))
 }
 
-fn not_git_entry(entry: &DirEntry) -> bool {
-    entry.file_name().to_str() != Some(".git")
+fn remaining_components(pattern: &Path) -> usize {
+    let mut found_meta = false;
+    let mut remaining = 0usize;
+
+    for component in pattern.components() {
+        if matches!(component, Component::Prefix(_) | Component::RootDir) {
+            continue;
+        }
+        let has_meta = component_has_glob_meta(&component.as_os_str().to_string_lossy());
+        if found_meta {
+            remaining += 1;
+            continue;
+        }
+        if has_meta {
+            found_meta = true;
+            remaining = 1;
+        }
+    }
+
+    remaining
+}
+
+fn path_depth(base: &Path, path: &Path) -> usize {
+    path.strip_prefix(base)
+        .map(|value| value.components().count())
+        .unwrap_or(0)
+}
+
+fn match_candidate_path<'a>(path: &'a Path, cwd: &'a Path, relative: bool) -> &'a Path {
+    if relative {
+        path.strip_prefix(cwd).unwrap_or(path)
+    } else {
+        path
+    }
+}
+
+fn should_visit_entry(entry: &DirEntry, subtree_root: &Path) -> bool {
+    !is_git_dir(entry) && is_in_subtree(entry.path(), subtree_root)
+}
+
+fn is_git_dir(entry: &DirEntry) -> bool {
+    entry
+        .file_type()
+        .is_some_and(|file_type| file_type.is_dir())
+        && entry.file_name().to_str() == Some(".git")
+}
+
+fn is_in_subtree(path: &Path, subtree_root: &Path) -> bool {
+    path.starts_with(subtree_root) || subtree_root.starts_with(path)
 }

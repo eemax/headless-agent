@@ -2,6 +2,9 @@ mod common;
 
 use std::{fs, time::Duration};
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
@@ -91,6 +94,157 @@ fn glob_respects_ignore_files() {
     let matches = payload["matches"].as_array().expect("matches array");
     assert_eq!(matches.len(), 1);
     assert_eq!(matches[0], "src/main.txt");
+}
+
+#[test]
+fn glob_respects_ignore_files_when_pattern_targets_ignored_root() {
+    let temp = TempDir::new().expect("tempdir");
+    let cwd = temp.path();
+    let run_dir = cwd.join("run");
+    fs::create_dir_all(&run_dir).expect("run dir");
+
+    fs::write(cwd.join(".ignore"), "generated/\n").expect(".ignore");
+    let generated_dir = cwd.join("generated");
+    fs::create_dir_all(&generated_dir).expect("generated dir");
+    fs::write(generated_dir.join("artifact.txt"), "x").expect("ignored file");
+
+    let config = test_config(cwd);
+    let run_control = new_run_control(&config, Duration::from_secs(5));
+    let context = ToolContext::new(
+        cwd,
+        &run_dir,
+        &config,
+        false,
+        &config.shell,
+        &config.shell_args,
+        &run_control,
+    );
+    let execution = execute_tool(
+        &context,
+        &["glob".to_string()],
+        "glob",
+        &json!({ "pattern": "generated/*.txt" }),
+    )
+    .expect("glob execution");
+    let payload: Value = serde_json::from_str(&execution.content).expect("json");
+    let matches = payload["matches"].as_array().expect("matches array");
+    assert!(matches.is_empty());
+}
+
+#[test]
+fn glob_explicit_git_pattern_returns_no_matches() {
+    let temp = TempDir::new().expect("tempdir");
+    let cwd = temp.path();
+    let run_dir = cwd.join("run");
+    fs::create_dir_all(&run_dir).expect("run dir");
+
+    let git_dir = cwd.join(".git");
+    fs::create_dir_all(&git_dir).expect(".git dir");
+    fs::write(git_dir.join("config.txt"), "x").expect(".git file");
+
+    let config = test_config(cwd);
+    let run_control = new_run_control(&config, Duration::from_secs(5));
+    let context = ToolContext::new(
+        cwd,
+        &run_dir,
+        &config,
+        false,
+        &config.shell,
+        &config.shell_args,
+        &run_control,
+    );
+    let execution = execute_tool(
+        &context,
+        &["glob".to_string()],
+        "glob",
+        &json!({ "pattern": ".git/**/*" }),
+    )
+    .expect("glob execution");
+    let payload: Value = serde_json::from_str(&execution.content).expect("json");
+    let matches = payload["matches"].as_array().expect("matches array");
+    assert!(matches.is_empty());
+}
+
+#[test]
+#[cfg(unix)]
+fn glob_non_recursive_patterns_do_not_descend_into_nested_directories() {
+    let temp = TempDir::new().expect("tempdir");
+    let cwd = temp.path();
+    let run_dir = cwd.join("run");
+    fs::create_dir_all(&run_dir).expect("run dir");
+
+    fs::write(cwd.join("src.txt"), "x").expect("src file");
+    let locked_dir = cwd.join("nested").join("locked");
+    fs::create_dir_all(&locked_dir).expect("locked dir");
+    let mut perms = fs::metadata(&locked_dir)
+        .expect("locked metadata")
+        .permissions();
+    perms.set_mode(0o000);
+    fs::set_permissions(&locked_dir, perms).expect("chmod 000");
+
+    let config = test_config(cwd);
+    let run_control = new_run_control(&config, Duration::from_secs(5));
+    let context = ToolContext::new(
+        cwd,
+        &run_dir,
+        &config,
+        false,
+        &config.shell,
+        &config.shell_args,
+        &run_control,
+    );
+    let execution = execute_tool(
+        &context,
+        &["glob".to_string()],
+        "glob",
+        &json!({ "pattern": "*.txt" }),
+    )
+    .expect("glob execution");
+
+    let mut restore = fs::metadata(&locked_dir)
+        .expect("locked metadata")
+        .permissions();
+    restore.set_mode(0o755);
+    fs::set_permissions(&locked_dir, restore).expect("chmod 755");
+
+    let payload: Value = serde_json::from_str(&execution.content).expect("json");
+    let matches = payload["matches"].as_array().expect("matches array");
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0], "src.txt");
+}
+
+#[test]
+fn glob_matches_when_cwd_contains_glob_metacharacters() {
+    let temp = TempDir::new().expect("tempdir");
+    let cwd = temp.path().join("repo[glob]");
+    fs::create_dir_all(&cwd).expect("cwd");
+    let run_dir = cwd.join("run");
+    fs::create_dir_all(&run_dir).expect("run dir");
+
+    fs::write(cwd.join("src.txt"), "x").expect("src file");
+
+    let config = test_config(&cwd);
+    let run_control = new_run_control(&config, Duration::from_secs(5));
+    let context = ToolContext::new(
+        &cwd,
+        &run_dir,
+        &config,
+        false,
+        &config.shell,
+        &config.shell_args,
+        &run_control,
+    );
+    let execution = execute_tool(
+        &context,
+        &["glob".to_string()],
+        "glob",
+        &json!({ "pattern": "*.txt" }),
+    )
+    .expect("glob execution");
+    let payload: Value = serde_json::from_str(&execution.content).expect("json");
+    let matches = payload["matches"].as_array().expect("matches array");
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0], "src.txt");
 }
 
 #[test]
