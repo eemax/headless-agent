@@ -59,6 +59,20 @@ pub struct AppOutput {
     pub stderr: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct SessionSettingUpdates<'a> {
+    role_name: Option<Option<&'a str>>,
+    model: Option<&'a str>,
+    effort: Option<crate::types::Effort>,
+    cwd: Option<&'a Path>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CommitInput<'a> {
+    agent_name: &'a str,
+    updates: SessionSettingUpdates<'a>,
+}
+
 pub fn run(command: Command, interrupted: Arc<AtomicBool>) -> Result<AppOutput, AppError> {
     let roots = HeadlessRoots::discover();
     let config = GlobalConfig::load(&roots)?;
@@ -212,13 +226,20 @@ fn run_prompt(
     };
 
     let agent = LoadedAgent::load(&roots, &agent_name)?;
-    let role_name_update = match (args.no_role, args.role.as_deref()) {
-        (true, None) => Some(None),
-        (false, Some(role_name)) => Some(Some(role_name)),
-        (false, None) => None,
-        (true, Some(_)) => unreachable!("cli parser rejects --role with --no-role"),
+    let session_updates = SessionSettingUpdates {
+        role_name: match (args.no_role, args.role.as_deref()) {
+            (true, None) => Some(None),
+            (false, Some(role_name)) => Some(Some(role_name)),
+            (false, None) => None,
+            (true, Some(_)) => unreachable!("cli parser rejects --role with --no-role"),
+        },
+        model: args.model.as_deref(),
+        effort: args.effort,
+        cwd: args.cwd.as_deref(),
     };
-    let role_name = match role_name_update {
+    let role_change_note =
+        sticky_role_change_note(session_meta.role_name.as_deref(), session_updates.role_name);
+    let role_name = match session_updates.role_name {
         Some(Some(role_name)) => Some(role_name.to_string()),
         Some(None) => None,
         None => session_meta.role_name.clone(),
@@ -227,7 +248,7 @@ fn run_prompt(
         .as_ref()
         .map(|name| LoadedRole::load(&roots, name))
         .transpose()?;
-    let prompt = args
+    let named_prompt = args
         .prompt_name
         .as_ref()
         .map(|name| LoadedPrompt::load(&roots, name))
@@ -251,16 +272,16 @@ fn run_prompt(
     let stdin = read_stdin_if_present(config.max_stdin_bytes)?;
 
     let history = store.load_messages(&session_id)?;
-    let prompt = assemble_prompt(
+    let assembled_prompt = assemble_prompt(
         &agent,
         role.as_ref(),
-        prompt.as_ref(),
+        named_prompt.as_ref(),
         &history,
         &args.message,
         stdin.as_deref(),
     )?;
     let compaction_at_tokens = agent.def.compaction_at_tokens.unwrap_or(180_000);
-    if prompt.estimated_tokens > compaction_at_tokens {
+    if assembled_prompt.estimated_tokens > compaction_at_tokens {
         return Err(AppError::Runtime(format!(
             "prompt assembly exceeded compaction threshold ({compaction_at_tokens} tokens); compaction is not implemented in this first pass"
         )));
@@ -268,7 +289,11 @@ fn run_prompt(
 
     let session_dir = store.session_dir(&session_id);
     let run_id = new_id();
-    let user_records = build_user_records(&run_id, &prompt.current_user_message, stdin.as_deref())?;
+    let user_records = build_user_records(
+        &run_id,
+        &assembled_prompt.current_user_message,
+        stdin.as_deref(),
+    )?;
     let run_dir = create_run_dir(&session_dir, &run_id)?;
     let run_context = AgentRunContext {
         session_id: session_id.clone(),
@@ -279,7 +304,7 @@ fn run_prompt(
         cwd: effective_cwd.clone(),
         effort,
         plan_mode,
-        prompt_messages: prompt.messages,
+        prompt_messages: assembled_prompt.messages,
         agent: agent.clone(),
         config: config.clone(),
         session_store: store.clone(),
@@ -297,11 +322,10 @@ fn run_prompt(
         &session_meta,
         &result,
         &user_records,
-        &agent_name,
-        role_name_update,
-        args.model.as_deref(),
-        args.effort,
-        args.cwd.as_deref(),
+        CommitInput {
+            agent_name: &agent_name,
+            updates: session_updates,
+        },
     );
     store.append_run(&session_id, commit, execution_guard.as_ref())?;
 
@@ -309,6 +333,9 @@ fn run_prompt(
         return Err(err);
     }
 
+    if let Some(note) = role_change_note {
+        stderr.push(note);
+    }
     if args.verbose || args.debug {
         stderr.push(format!(
             "session={} model={} effort={} cwd={}",
@@ -332,11 +359,7 @@ fn build_commit(
     session_meta: &SessionMeta,
     result: &RunResult,
     user_records: &[TranscriptRecord],
-    agent_name: &str,
-    role_name_update: Option<Option<&str>>,
-    model_update: Option<&str>,
-    effort_update: Option<crate::types::Effort>,
-    cwd_update: Option<&Path>,
+    input: CommitInput<'_>,
 ) -> SessionCommit {
     let records = project_session_history(user_records, result);
     let char_count_delta = records.iter().map(|record| record.char_count()).sum();
@@ -347,11 +370,29 @@ fn build_commit(
         bind_agent_name: session_meta
             .agent_name
             .is_none()
-            .then(|| agent_name.to_string()),
-        update_model: model_update.map(ToOwned::to_owned),
-        update_effort: effort_update,
-        update_cwd: cwd_update.map(|cwd| cwd.display().to_string()),
-        update_role_name: role_name_update.map(|value| value.map(ToOwned::to_owned)),
+            .then(|| input.agent_name.to_string()),
+        update_model: input.updates.model.map(ToOwned::to_owned),
+        update_effort: input.updates.effort,
+        update_cwd: input.updates.cwd.map(|cwd| cwd.display().to_string()),
+        update_role_name: input
+            .updates
+            .role_name
+            .map(|value| value.map(ToOwned::to_owned)),
+    }
+}
+
+fn sticky_role_change_note(
+    previous_role_name: Option<&str>,
+    role_name_update: Option<Option<&str>>,
+) -> Option<String> {
+    match (previous_role_name, role_name_update) {
+        (_, None) | (None, Some(None)) => None,
+        (Some(previous), Some(Some(next))) if previous == next => None,
+        (None, Some(Some(next))) => Some(format!("sticky role set to `{next}`")),
+        (Some(previous), Some(Some(next))) => {
+            Some(format!("sticky role changed from `{previous}` to `{next}`"))
+        }
+        (Some(previous), Some(None)) => Some(format!("sticky role cleared (was `{previous}`)")),
     }
 }
 

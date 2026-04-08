@@ -34,6 +34,17 @@ pub struct AgentRunContext {
     pub interrupted: Arc<AtomicBool>,
 }
 
+struct PartialOutcomeInput {
+    records: Vec<TranscriptRecord>,
+    artifacts: RunArtifacts,
+    provider_steps: Vec<ProviderStepRecord>,
+    provider_usage_summary: ProviderUsageSummary,
+    termination: LoopTermination,
+    run_control: RunControl,
+    prompt_tokens: usize,
+    completion_tokens: usize,
+}
+
 const TOOL_RETRY_CAP: usize = 2;
 
 pub fn run_agent_loop(context: AgentRunContext) -> Result<RunOutcome, AppError> {
@@ -76,16 +87,16 @@ pub fn run_agent_loop(context: AgentRunContext) -> Result<RunOutcome, AppError> 
         let request_timeout = match run_control.remaining_budget() {
             Ok(timeout) => timeout,
             Err(err) => {
-                return Ok(partial_outcome(
+                return Ok(partial_outcome(PartialOutcomeInput {
                     records,
                     artifacts,
                     provider_steps,
                     provider_usage_summary,
-                    LoopTermination::Timeout(err.to_string()),
+                    termination: LoopTermination::Timeout(err.to_string()),
                     run_control,
-                    total_prompt_tokens,
-                    total_completion_tokens,
-                ));
+                    prompt_tokens: total_prompt_tokens,
+                    completion_tokens: total_completion_tokens,
+                }));
             }
         };
         let response = match client.send_chat(ChatRequest {
@@ -99,28 +110,28 @@ pub fn run_agent_loop(context: AgentRunContext) -> Result<RunOutcome, AppError> 
         }) {
             Ok(response) => response,
             Err(AppError::Timeout(msg)) => {
-                return Ok(partial_outcome(
+                return Ok(partial_outcome(PartialOutcomeInput {
                     records,
                     artifacts,
                     provider_steps,
                     provider_usage_summary,
-                    LoopTermination::Timeout(msg),
+                    termination: LoopTermination::Timeout(msg),
                     run_control,
-                    total_prompt_tokens,
-                    total_completion_tokens,
-                ));
+                    prompt_tokens: total_prompt_tokens,
+                    completion_tokens: total_completion_tokens,
+                }));
             }
             Err(err) if !records.is_empty() => {
-                return Ok(partial_outcome(
+                return Ok(partial_outcome(PartialOutcomeInput {
                     records,
                     artifacts,
                     provider_steps,
                     provider_usage_summary,
-                    LoopTermination::Error(err.to_string()),
+                    termination: LoopTermination::Error(err.to_string()),
                     run_control,
-                    total_prompt_tokens,
-                    total_completion_tokens,
-                ));
+                    prompt_tokens: total_prompt_tokens,
+                    completion_tokens: total_completion_tokens,
+                }));
             }
             Err(err) => return Err(err),
         };
@@ -142,16 +153,16 @@ pub fn run_agent_loop(context: AgentRunContext) -> Result<RunOutcome, AppError> 
             reasoning_details: response.reasoning_details.clone(),
         });
         if let Err(err) = run_control.remaining_budget() {
-            return Ok(partial_outcome(
+            return Ok(partial_outcome(PartialOutcomeInput {
                 records,
                 artifacts,
                 provider_steps,
                 provider_usage_summary,
-                LoopTermination::Timeout(err.to_string()),
+                termination: LoopTermination::Timeout(err.to_string()),
                 run_control,
-                total_prompt_tokens,
-                total_completion_tokens,
-            ));
+                prompt_tokens: total_prompt_tokens,
+                completion_tokens: total_completion_tokens,
+            }));
         }
 
         let (assistant_content, assistant_artifact) =
@@ -207,28 +218,28 @@ pub fn run_agent_loop(context: AgentRunContext) -> Result<RunOutcome, AppError> 
             ) {
                 Ok(exec) => exec,
                 Err(AppError::Timeout(msg)) => {
-                    return Ok(partial_outcome(
+                    return Ok(partial_outcome(PartialOutcomeInput {
                         records,
                         artifacts,
                         provider_steps,
                         provider_usage_summary,
-                        LoopTermination::Timeout(msg),
+                        termination: LoopTermination::Timeout(msg),
                         run_control,
-                        total_prompt_tokens,
-                        total_completion_tokens,
-                    ));
+                        prompt_tokens: total_prompt_tokens,
+                        completion_tokens: total_completion_tokens,
+                    }));
                 }
                 Err(err) => {
-                    return Ok(partial_outcome(
+                    return Ok(partial_outcome(PartialOutcomeInput {
                         records,
                         artifacts,
                         provider_steps,
                         provider_usage_summary,
-                        LoopTermination::Error(err.to_string()),
+                        termination: LoopTermination::Error(err.to_string()),
                         run_control,
-                        total_prompt_tokens,
-                        total_completion_tokens,
-                    ));
+                        prompt_tokens: total_prompt_tokens,
+                        completion_tokens: total_completion_tokens,
+                    }));
                 }
             };
             if let Some(artifact) = &execution.artifact {
@@ -261,17 +272,9 @@ pub fn run_agent_loop(context: AgentRunContext) -> Result<RunOutcome, AppError> 
     }
 }
 
-fn partial_outcome(
-    records: Vec<TranscriptRecord>,
-    artifacts: RunArtifacts,
-    provider_steps: Vec<ProviderStepRecord>,
-    provider_usage_summary: ProviderUsageSummary,
-    termination: LoopTermination,
-    run_control: RunControl,
-    prompt_tokens: usize,
-    completion_tokens: usize,
-) -> RunOutcome {
-    let final_text = records
+fn partial_outcome(input: PartialOutcomeInput) -> RunOutcome {
+    let final_text = input
+        .records
         .iter()
         .rev()
         .find_map(|r| {
@@ -285,15 +288,15 @@ fn partial_outcome(
     RunOutcome {
         result: RunResult {
             final_text,
-            records,
-            artifacts,
-            provider_steps,
-            provider_usage_summary,
-            termination,
-            total_prompt_tokens: prompt_tokens,
-            total_completion_tokens: completion_tokens,
+            records: input.records,
+            artifacts: input.artifacts,
+            provider_steps: input.provider_steps,
+            provider_usage_summary: input.provider_usage_summary,
+            termination: input.termination,
+            total_prompt_tokens: input.prompt_tokens,
+            total_completion_tokens: input.completion_tokens,
         },
-        execution_guard: run_control.into_execution_guard(),
+        execution_guard: input.run_control.into_execution_guard(),
     }
 }
 

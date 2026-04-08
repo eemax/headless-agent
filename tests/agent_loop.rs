@@ -477,7 +477,8 @@ fn second_mutating_run_fails_fast_while_execution_lock_is_held() {
     ]);
     let first_handle = thread::spawn(move || first.output().expect("first output"));
 
-    thread::sleep(Duration::from_millis(100));
+    server.wait_for_requests(1, Duration::from_secs(1));
+    thread::sleep(Duration::from_millis(50));
 
     let mut second = workspace.std_command();
     second.args([
@@ -807,7 +808,10 @@ fn reasoning_is_resent_within_a_run_and_provider_metadata_is_persisted() {
     assert_eq!(provider_records[0]["usage"]["cached_tokens"], 11);
     assert_eq!(provider_records[0]["usage"]["cache_write_tokens"], 3);
     assert_eq!(provider_records[0]["usage"]["reasoning_tokens"], 5);
-    assert_eq!(provider_records[0]["reasoning"]["signature"], "opaque-reasoning");
+    assert_eq!(
+        provider_records[0]["reasoning"]["signature"],
+        "opaque-reasoning"
+    );
     assert_eq!(
         provider_records[0]["reasoning_details"][0]["type"],
         "reasoning.summary"

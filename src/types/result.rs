@@ -1,7 +1,4 @@
-use crate::{
-    error::AppError,
-    session::SessionExecutionGuard,
-};
+use crate::{error::AppError, session::SessionExecutionGuard};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 

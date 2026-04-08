@@ -102,9 +102,9 @@ fn extract_json(
         truncated,
         error: if body_truncated {
             None
-        } else if body.len() <= MAX_JSON_PRETTY_BYTES {
-            Some("decode_error")
-        } else if explicit_json && !oversized_explicit_json_is_valid {
+        } else if body.len() <= MAX_JSON_PRETTY_BYTES
+            || (explicit_json && !oversized_explicit_json_is_valid)
+        {
             Some("decode_error")
         } else {
             None
@@ -219,10 +219,10 @@ fn decode_text_body(
     sniff_html_meta: bool,
 ) -> String {
     let encoding = detect_encoding(content_type_header, body, sniff_html_meta);
-    if encoding == UTF_8 {
-        if let Ok(valid) = std::str::from_utf8(body) {
-            return valid.to_string();
-        }
+    if encoding == UTF_8
+        && let Ok(valid) = std::str::from_utf8(body)
+    {
+        return valid.to_string();
     }
     let (decoded, _, _) = encoding.decode(body);
     decoded.into_owned()

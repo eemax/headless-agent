@@ -133,9 +133,7 @@ fn openrouter_parses_usage_cache_and_reasoning_metadata() {
     assert_eq!(usage.cache_write_tokens, Some(4));
     assert_eq!(usage.reasoning_tokens, Some(7));
     assert_eq!(
-        response
-            .usage_raw
-            .expect("raw usage should be present")["prompt_tokens_details"]["cached_tokens"],
+        response.usage_raw.expect("raw usage should be present")["prompt_tokens_details"]["cached_tokens"],
         21
     );
     assert_eq!(
@@ -204,7 +202,102 @@ fn assistant_reasoning_fields_are_sent_when_present() {
     let assistant = &requests[0]["messages"][1];
     assert_eq!(assistant["role"], "assistant");
     assert_eq!(assistant["reasoning"]["signature"], "opaque-reasoning");
-    assert_eq!(assistant["reasoning_details"][0]["type"], "reasoning.summary");
+    assert_eq!(
+        assistant["reasoning_details"][0]["type"],
+        "reasoning.summary"
+    );
+}
+
+#[test]
+fn openrouter_ignores_empty_usage_and_null_reasoning_metadata() {
+    let server = FakeOpenRouter::start(vec![
+        ResponseSpec::json(json!({
+            "choices": [
+                {
+                    "message": {
+                        "content": "first",
+                        "reasoning": null,
+                        "reasoning_details": null
+                    }
+                }
+            ],
+            "usage": {}
+        })),
+        ResponseSpec::json(json!({
+            "choices": [
+                {
+                    "message": {
+                        "content": "second"
+                    }
+                }
+            ]
+        })),
+    ]);
+    let client = OpenRouterClient::new(server.url(), "test-key".to_string());
+    let first = client
+        .send_chat(ChatRequest {
+            session_id: "session-1",
+            model: "openai/gpt-4.1",
+            effort: Effort::Low,
+            messages: &[PromptMessage {
+                role: MessageRole::User,
+                content: Some("hello".to_string()),
+                name: None,
+                tool_call_id: None,
+                tool_calls: Vec::new(),
+                reasoning: None,
+                reasoning_details: None,
+            }],
+            tools: &[],
+            max_output_tokens: 128,
+            timeout: Duration::from_secs(5),
+        })
+        .expect("first provider response");
+
+    assert!(first.usage.is_none());
+    assert!(first.reasoning.is_none());
+    assert!(first.reasoning_details.is_none());
+    assert_eq!(
+        first.usage_raw.expect("raw usage should be present"),
+        json!({})
+    );
+
+    client
+        .send_chat(ChatRequest {
+            session_id: "session-1",
+            model: "openai/gpt-4.1",
+            effort: Effort::Low,
+            messages: &[
+                PromptMessage {
+                    role: MessageRole::User,
+                    content: Some("hello".to_string()),
+                    name: None,
+                    tool_call_id: None,
+                    tool_calls: Vec::new(),
+                    reasoning: None,
+                    reasoning_details: None,
+                },
+                PromptMessage {
+                    role: MessageRole::Assistant,
+                    content: Some("first".to_string()),
+                    name: None,
+                    tool_call_id: None,
+                    tool_calls: Vec::new(),
+                    reasoning: first.reasoning,
+                    reasoning_details: first.reasoning_details,
+                },
+            ],
+            tools: &[],
+            max_output_tokens: 128,
+            timeout: Duration::from_secs(5),
+        })
+        .expect("second provider response");
+
+    let requests = server.requests();
+    let assistant = &requests[1]["messages"][1];
+    assert_eq!(assistant["role"], "assistant");
+    assert!(assistant.get("reasoning").is_none());
+    assert!(assistant.get("reasoning_details").is_none());
 }
 
 #[test]

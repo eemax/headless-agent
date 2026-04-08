@@ -361,10 +361,10 @@ fn fork_creates_branch_session_and_preserves_source_session() {
         "forked answer"
     );
     let stderr = String::from_utf8(second.stderr).expect("stderr");
-    let fork_prefix = format!("forked session ");
+    let fork_prefix = "forked session ";
     let fork_line = stderr
         .lines()
-        .find(|line| line.starts_with(&fork_prefix))
+        .find(|line| line.starts_with(fork_prefix))
         .expect("fork stderr line");
     let fork_id = fork_line
         .split_whitespace()
@@ -715,7 +715,9 @@ fn role_selected_on_new_session_persists_system_injection() {
         .output()
         .expect("first run");
     assert!(first.status.success());
-    let session_id = extract_created_session_id(&String::from_utf8(first.stderr).expect("stderr"));
+    let first_stderr = String::from_utf8(first.stderr).expect("stderr");
+    assert!(first_stderr.contains("sticky role set to `auditor`"));
+    let session_id = extract_created_session_id(&first_stderr);
 
     let second = workspace
         .command()
@@ -798,6 +800,8 @@ system_prompt_file = "../prompts/planner.md"
         .output()
         .expect("second run");
     assert!(second.status.success());
+    let second_stderr = String::from_utf8(second.stderr).expect("stderr");
+    assert!(second_stderr.contains("sticky role changed from `auditor` to `planner`"));
 
     let third = workspace
         .command()
@@ -864,6 +868,8 @@ fn no_role_clears_sticky_role() {
         .output()
         .expect("second run");
     assert!(second.status.success());
+    let second_stderr = String::from_utf8(second.stderr).expect("stderr");
+    assert!(second_stderr.contains("sticky role cleared (was `auditor`)"));
 
     let third = workspace
         .command()
@@ -887,6 +893,35 @@ fn no_role_clears_sticky_role() {
         .expect("session show");
     let meta: Value = serde_json::from_slice(&show_output.stdout).expect("meta json");
     assert_eq!(meta["role_name"], Value::Null);
+}
+
+#[test]
+fn no_role_without_sticky_role_does_not_emit_note() {
+    let server = FakeOpenRouter::start(vec![
+        ResponseSpec::json(json!({ "choices": [{ "message": { "content": "first" } }] })),
+        ResponseSpec::json(json!({ "choices": [{ "message": { "content": "second" } }] })),
+    ]);
+    let workspace = TestWorkspace::new();
+    workspace.write_repo_assets(&server.url());
+
+    let first = workspace
+        .command()
+        .args(["--session", "new", "--agent", "coder", "plain start"])
+        .output()
+        .expect("first run");
+    assert!(first.status.success());
+    let first_stderr = String::from_utf8(first.stderr).expect("stderr");
+    assert!(!first_stderr.contains("sticky role"));
+    let session_id = extract_created_session_id(&first_stderr);
+
+    let second = workspace
+        .command()
+        .args(["--session", &session_id, "--no-role", "still plain"])
+        .output()
+        .expect("second run");
+    assert!(second.status.success());
+    let second_stderr = String::from_utf8(second.stderr).expect("stderr");
+    assert!(!second_stderr.contains("sticky role"));
 }
 
 #[test]

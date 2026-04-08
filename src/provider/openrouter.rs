@@ -154,8 +154,9 @@ fn send_chat_blocking(
         .collect();
     let usage_raw = raw.get("usage").cloned();
     let usage = usage_raw.as_ref().and_then(normalize_usage);
-    let reasoning = raw.pointer("/choices/0/message/reasoning").cloned();
-    let reasoning_details = raw.pointer("/choices/0/message/reasoning_details").cloned();
+    let reasoning = clone_non_null_json(raw.pointer("/choices/0/message/reasoning"));
+    let reasoning_details =
+        clone_non_null_json(raw.pointer("/choices/0/message/reasoning_details"));
 
     Ok(ProviderResponse {
         content,
@@ -205,10 +206,15 @@ fn build_payload(
                             .collect(),
                     );
                 }
-                if let Some(reasoning) = &message.reasoning {
+                if let Some(reasoning) = message.reasoning.as_ref().filter(|value| !value.is_null())
+                {
                     value["reasoning"] = reasoning.clone();
                 }
-                if let Some(reasoning_details) = &message.reasoning_details {
+                if let Some(reasoning_details) = message
+                    .reasoning_details
+                    .as_ref()
+                    .filter(|value| !value.is_null())
+                {
                     value["reasoning_details"] = reasoning_details.clone();
                 }
                 value
@@ -316,8 +322,13 @@ fn preview_body(body: &str) -> String {
     }
 }
 
+fn clone_non_null_json(value: Option<&Value>) -> Option<Value> {
+    value.filter(|value| !value.is_null()).cloned()
+}
+
 fn normalize_usage(raw: &Value) -> Option<ProviderTokenUsage> {
-    if !raw.is_object() {
+    let raw_object = raw.as_object()?;
+    if raw_object.is_empty() {
         return None;
     }
 
@@ -352,7 +363,9 @@ fn extract_counter(value: &Value, keys: &[&str]) -> Option<usize> {
 
 fn value_to_usize(value: &Value) -> Option<usize> {
     match value {
-        Value::Number(number) => number.as_u64().and_then(|value| usize::try_from(value).ok()),
+        Value::Number(number) => number
+            .as_u64()
+            .and_then(|value| usize::try_from(value).ok()),
         Value::String(text) => text.parse::<usize>().ok(),
         _ => None,
     }

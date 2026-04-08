@@ -7,9 +7,10 @@ use tempfile::TempDir;
 use headless::{config::GlobalConfig, session::SessionStore};
 
 fn test_config(root: &std::path::Path) -> GlobalConfig {
-    let mut config = GlobalConfig::default();
-    config.sessions_dir = root.join("sessions");
-    config
+    GlobalConfig {
+        sessions_dir: root.join("sessions"),
+        ..GlobalConfig::default()
+    }
 }
 
 #[test]
