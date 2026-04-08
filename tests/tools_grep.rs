@@ -410,6 +410,49 @@ fn grep_returns_partial_results_when_descendants_are_unreadable() {
 }
 
 #[test]
+#[cfg(unix)]
+fn grep_unreadable_explicit_root_returns_tool_error() {
+    let temp = TempDir::new().expect("tempdir");
+    let cwd = temp.path();
+    let run_dir = cwd.join("run");
+    fs::create_dir_all(&run_dir).expect("run dir");
+
+    fs::write(cwd.join("secret.txt"), "findme\n").expect("secret file");
+    let mut perms = fs::metadata(cwd.join("secret.txt"))
+        .expect("secret metadata")
+        .permissions();
+    perms.set_mode(0o000);
+    fs::set_permissions(cwd.join("secret.txt"), perms).expect("chmod 000");
+
+    let config = test_config(cwd);
+    let run_control = new_run_control(&config, Duration::from_secs(5));
+    let context = ToolContext::new(
+        cwd,
+        &run_dir,
+        &config,
+        false,
+        &config.shell,
+        &config.shell_args,
+        &run_control,
+    );
+    let error = execute_tool(
+        &context,
+        &["grep".to_string()],
+        "grep",
+        &json!({ "pattern": "findme", "path": "secret.txt" }),
+    )
+    .expect_err("unreadable explicit root should fail");
+
+    let mut restore = fs::metadata(cwd.join("secret.txt"))
+        .expect("secret metadata")
+        .permissions();
+    restore.set_mode(0o600);
+    fs::set_permissions(cwd.join("secret.txt"), restore).expect("chmod 600");
+
+    assert!(matches!(error, AppError::Tool(_)));
+}
+
+#[test]
 fn grep_invalid_regex_returns_tool_error() {
     let temp = TempDir::new().expect("tempdir");
     let cwd = temp.path();

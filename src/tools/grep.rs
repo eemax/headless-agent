@@ -59,7 +59,6 @@ pub fn grep_search(context: &ToolContext<'_>, arguments: &Value) -> Result<Value
 
     let mut process = Command::new("rg");
     process.current_dir(context.cwd);
-    process.arg("--no-messages");
     process.arg("--json");
     process.arg("--hidden");
     process.arg("-g");
@@ -134,7 +133,9 @@ pub fn grep_search(context: &ToolContext<'_>, arguments: &Value) -> Result<Value
     let parsed = collect_rg_parser(stdout_handle)?;
     let (stderr_bytes, _) = collect_reader(stderr_handle)?;
     let stderr = String::from_utf8_lossy(&stderr_bytes).trim().to_string();
-    let partial = status.code() == Some(2) && stderr.is_empty() && parsed.files_scanned > 0;
+    let partial = status.code() == Some(2)
+        && parsed.files_scanned > 0
+        && stderr_has_only_nonfatal_path_errors(&stderr);
 
     if !status.success()
         && status.code() != Some(1)
@@ -172,6 +173,13 @@ pub fn grep_search(context: &ToolContext<'_>, arguments: &Value) -> Result<Value
         ));
     }
     Ok(result)
+}
+
+fn stderr_has_only_nonfatal_path_errors(stderr: &str) -> bool {
+    !stderr.is_empty()
+        && stderr
+            .lines()
+            .all(|line| line.starts_with("rg: ") && line.contains("(os error "))
 }
 
 fn search_root_is_excluded(cwd: &Path, root: &Path) -> bool {

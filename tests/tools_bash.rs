@@ -209,6 +209,38 @@ fn bash_artifact_backing_stores_large_output() {
     assert!(bash.artifact.is_some());
 }
 
+#[test]
+fn bash_commands_reading_stdin_see_eof() {
+    let temp = TempDir::new().expect("tempdir");
+    let cwd = temp.path();
+    let run_dir = cwd.join("run");
+    fs::create_dir_all(&run_dir).expect("run dir");
+
+    let config = test_config(cwd);
+    let run_control = new_run_control(&config, Duration::from_secs(5));
+    let context = ToolContext::new(
+        cwd,
+        &run_dir,
+        &config,
+        false,
+        &config.shell,
+        &config.shell_args,
+        &run_control,
+    );
+    let execution = execute_tool(
+        &context,
+        &["bash".to_string()],
+        "bash",
+        &json!({
+            "command": "python3 -c \"import sys; data = sys.stdin.read(); print(repr(data))\""
+        }),
+    )
+    .expect("bash execution");
+    let payload: Value = serde_json::from_str(&execution.content).expect("json");
+    assert_eq!(payload["ok"], true);
+    assert_eq!(payload["stdout"], "''\n");
+}
+
 fn test_config(cwd: &std::path::Path) -> GlobalConfig {
     GlobalConfig {
         sessions_dir: cwd.join("sessions"),

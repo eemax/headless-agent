@@ -36,6 +36,7 @@ pub fn run_bash(context: &ToolContext<'_>, arguments: &Value) -> Result<Value, A
     process.args(context.shell_args);
     process.arg(&command);
     process.current_dir(context.cwd);
+    process.stdin(Stdio::null());
     process.stdout(Stdio::piped());
     process.stderr(Stdio::piped());
     #[cfg(unix)]

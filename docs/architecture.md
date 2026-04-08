@@ -181,8 +181,12 @@ Tool properties:
 - persist their payloads through the artifact layer
 - in `--plan` mode, all tools become non-executing and return planned-action payloads
 - `read_file`, `glob`, and `grep` are retried on ordinary tool errors; `web_search` and `web_fetch` are read-only and single-attempt at the framework level, and `web_fetch` performs bounded internal address fallback before returning a transport failure; mutating tools are single-attempt
+- `read_file` validates 1-indexed line ranges, still caps to 2000 lines whenever `end_line` is omitted, and may return `total_lines_lower_bound` instead of exact `total_lines` when it intentionally stops scanning early
 - `bash` is treated as mutating and is killed on timeout, including its subprocess group
-- `apply_patch` keeps parsing and staging cancellable, but once filesystem commit begins it no longer consults the run budget; it either commits fully or rolls back
+- `bash` launches commands with closed stdin unless future tool arguments provide explicit input
+- `glob` rejects parent-relative patterns and absolute wildcard patterns that do not include a literal path prefix before expansion
+- `grep` distinguishes unreadable-descendant partial results from fatal ripgrep failures using captured path-error diagnostics
+- `apply_patch` keeps parsing and staging cancellable, but once filesystem commit begins it no longer consults the run budget; it either commits fully or rolls back, rejects ambiguous hunk contexts, and honors `*** End of File` as an actual EOF anchor
 - `web_search` currently exposes the simplified Exa mode subset `auto|neural|deep`, even though the upstream API supports additional modes
 
 ## Artifacts

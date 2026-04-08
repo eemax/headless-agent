@@ -60,6 +60,7 @@ enum PatchOp {
 struct PatchHunk {
     old_lines: Vec<String>,
     new_lines: Vec<String>,
+    anchor_eof: bool,
 }
 
 #[derive(Debug)]
@@ -138,16 +139,29 @@ fn parse_patch(input: &str) -> Result<Vec<PatchOp>, AppError> {
                 index += 1;
             }
             let mut change_lines = Vec::new();
-            while index < lines.len() - 1 && !lines[index].starts_with("*** ") {
-                if lines[index] != "*** End of File" {
-                    change_lines.push(lines[index].to_string());
+            let mut anchor_eof = false;
+            while index < lines.len() - 1 {
+                if lines[index] == "*** End of File" {
+                    anchor_eof = true;
+                    index += 1;
+                    if index < lines.len() - 1 && !lines[index].starts_with("*** ") {
+                        return Err(AppError::Tool(
+                            "`*** End of File` must be the last line in an update section"
+                                .to_string(),
+                        ));
+                    }
+                    break;
                 }
+                if lines[index].starts_with("*** ") {
+                    break;
+                }
+                change_lines.push(lines[index].to_string());
                 index += 1;
             }
             operations.push(PatchOp::Update {
                 path: path.to_string(),
                 move_to,
-                hunks: build_hunks(&change_lines)?,
+                hunks: build_hunks(&change_lines, anchor_eof)?,
             });
             continue;
         }
@@ -156,7 +170,7 @@ fn parse_patch(input: &str) -> Result<Vec<PatchOp>, AppError> {
     Ok(operations)
 }
 
-fn build_hunks(lines: &[String]) -> Result<Vec<PatchHunk>, AppError> {
+fn build_hunks(lines: &[String], anchor_eof: bool) -> Result<Vec<PatchHunk>, AppError> {
     let mut hunks = Vec::new();
     let mut current = Vec::new();
 
@@ -179,6 +193,9 @@ fn build_hunks(lines: &[String]) -> Result<Vec<PatchHunk>, AppError> {
             "update patch did not contain any hunks".to_string(),
         ));
     }
+    if anchor_eof && let Some(last) = hunks.last_mut() {
+        last.anchor_eof = true;
+    }
     Ok(hunks)
 }
 
@@ -186,14 +203,20 @@ fn change_lines_to_hunk(lines: &[String]) -> Result<PatchHunk, AppError> {
     let mut old_lines = Vec::new();
     let mut new_lines = Vec::new();
     for line in lines {
-        let (prefix, text) = line.split_at(1);
+        let mut chars = line.chars();
+        let Some(prefix) = chars.next() else {
+            return Err(AppError::Tool(
+                "invalid empty patch change line".to_string(),
+            ));
+        };
+        let text = chars.as_str();
         match prefix {
-            " " => {
+            ' ' => {
                 old_lines.push(text.to_string());
                 new_lines.push(text.to_string());
             }
-            "-" => old_lines.push(text.to_string()),
-            "+" => new_lines.push(text.to_string()),
+            '-' => old_lines.push(text.to_string()),
+            '+' => new_lines.push(text.to_string()),
             _ => {
                 return Err(AppError::Tool(format!(
                     "invalid patch change line `{line}`"
@@ -204,6 +227,7 @@ fn change_lines_to_hunk(lines: &[String]) -> Result<PatchHunk, AppError> {
     Ok(PatchHunk {
         old_lines,
         new_lines,
+        anchor_eof: false,
     })
 }
 
@@ -238,9 +262,12 @@ fn build_execution_plan(
             PatchOp::Delete { path } => {
                 let path = resolve_path(context.cwd, &path);
                 reserve_path(&mut touched_paths, &path)?;
-                if !path.exists() {
+                let metadata = fs::symlink_metadata(&path).map_err(|err| {
+                    AppError::Tool(format!("cannot delete {}; {err}", path.display()))
+                })?;
+                if metadata.is_dir() {
                     return Err(AppError::Tool(format!(
-                        "cannot delete {}; file does not exist",
+                        "cannot delete {}; path is a directory",
                         path.display()
                     )));
                 }
@@ -496,11 +523,7 @@ fn apply_hunks(original: &str, hunks: &[PatchHunk]) -> Result<String, AppError> 
     let mut cursor = 0;
 
     for hunk in hunks {
-        let start = find_subsequence(&original_lines[cursor..], &hunk.old_lines)
-            .map(|offset| offset + cursor)
-            .ok_or_else(|| {
-                AppError::Tool("patch context did not match file contents".to_string())
-            })?;
+        let start = locate_hunk_start(&original_lines[cursor..], hunk)? + cursor;
         result.extend(original_lines[cursor..start].iter().cloned());
         result.extend(hunk.new_lines.iter().cloned());
         cursor = start + hunk.old_lines.len();
@@ -514,13 +537,45 @@ fn apply_hunks(original: &str, hunks: &[PatchHunk]) -> Result<String, AppError> 
     Ok(output)
 }
 
-fn find_subsequence(haystack: &[String], needle: &[String]) -> Option<usize> {
-    if needle.is_empty() {
-        return Some(0);
+fn locate_hunk_start(haystack: &[String], hunk: &PatchHunk) -> Result<usize, AppError> {
+    if hunk.anchor_eof {
+        if hunk.old_lines.is_empty() {
+            return Ok(haystack.len());
+        }
+        return haystack
+            .ends_with(&hunk.old_lines)
+            .then_some(haystack.len() - hunk.old_lines.len())
+            .ok_or_else(|| {
+                AppError::Tool("patch EOF context did not match file contents".to_string())
+            });
     }
-    haystack
-        .windows(needle.len())
-        .position(|window| window == needle)
+
+    if hunk.old_lines.is_empty() {
+        return if haystack.is_empty() {
+            Ok(0)
+        } else {
+            Err(AppError::Tool(
+                "patch insertion hunk needs context or `*** End of File` anchoring".to_string(),
+            ))
+        };
+    }
+
+    let mut matches = haystack
+        .windows(hunk.old_lines.len())
+        .enumerate()
+        .filter(|(_, window)| *window == hunk.old_lines)
+        .map(|(index, _)| index);
+    let Some(first) = matches.next() else {
+        return Err(AppError::Tool(
+            "patch context did not match file contents".to_string(),
+        ));
+    };
+    if matches.next().is_some() {
+        return Err(AppError::Tool(
+            "patch context matched multiple locations; provide more context".to_string(),
+        ));
+    }
+    Ok(first)
 }
 
 fn join_lines(lines: &[String]) -> String {

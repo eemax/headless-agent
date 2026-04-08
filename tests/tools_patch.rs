@@ -118,6 +118,197 @@ fn valid_multi_file_patch_commits_all_requested_changes() {
 }
 
 #[test]
+fn malformed_patch_blank_hunk_line_returns_tool_error() {
+    let temp = TempDir::new().expect("tempdir");
+    let cwd = temp.path();
+    let run_dir = cwd.join("run");
+    fs::create_dir_all(&run_dir).expect("run dir");
+    fs::write(cwd.join("existing.txt"), "before\n").expect("existing file");
+
+    let config = test_config(cwd);
+    let run_control = new_run_control(&config, Duration::from_secs(5));
+    let context = ToolContext::new(
+        cwd,
+        &run_dir,
+        &config,
+        false,
+        &config.shell,
+        &config.shell_args,
+        &run_control,
+    );
+    let patch = "\
+*** Begin Patch
+*** Update File: existing.txt
+@@
+
++after
+*** End Patch";
+
+    let error = execute_tool(
+        &context,
+        &["apply_patch".to_string()],
+        "apply_patch",
+        &json!({ "patch": patch }),
+    )
+    .expect_err("blank hunk line should fail");
+    assert!(matches!(error, AppError::Tool(_)));
+}
+
+#[test]
+fn malformed_patch_multibyte_prefix_returns_tool_error() {
+    let temp = TempDir::new().expect("tempdir");
+    let cwd = temp.path();
+    let run_dir = cwd.join("run");
+    fs::create_dir_all(&run_dir).expect("run dir");
+    fs::write(cwd.join("existing.txt"), "before\n").expect("existing file");
+
+    let config = test_config(cwd);
+    let run_control = new_run_control(&config, Duration::from_secs(5));
+    let context = ToolContext::new(
+        cwd,
+        &run_dir,
+        &config,
+        false,
+        &config.shell,
+        &config.shell_args,
+        &run_control,
+    );
+    let patch = "\
+*** Begin Patch
+*** Update File: existing.txt
+@@
+ébefore
+*** End Patch";
+
+    let error = execute_tool(
+        &context,
+        &["apply_patch".to_string()],
+        "apply_patch",
+        &json!({ "patch": patch }),
+    )
+    .expect_err("multibyte prefix should fail");
+    assert!(matches!(error, AppError::Tool(_)));
+}
+
+#[test]
+fn delete_file_rejects_directories() {
+    let temp = TempDir::new().expect("tempdir");
+    let cwd = temp.path();
+    let run_dir = cwd.join("run");
+    fs::create_dir_all(&run_dir).expect("run dir");
+    fs::create_dir_all(cwd.join("dir/child")).expect("nested dir");
+    fs::write(cwd.join("dir/child/file.txt"), "x").expect("child file");
+
+    let config = test_config(cwd);
+    let run_control = new_run_control(&config, Duration::from_secs(5));
+    let context = ToolContext::new(
+        cwd,
+        &run_dir,
+        &config,
+        false,
+        &config.shell,
+        &config.shell_args,
+        &run_control,
+    );
+    let patch = "\
+*** Begin Patch
+*** Delete File: dir
+*** End Patch";
+
+    let error = execute_tool(
+        &context,
+        &["apply_patch".to_string()],
+        "apply_patch",
+        &json!({ "patch": patch }),
+    )
+    .expect_err("directory delete should fail");
+    assert!(matches!(error, AppError::Tool(_)));
+    assert!(cwd.join("dir/child/file.txt").exists());
+}
+
+#[test]
+fn ambiguous_patch_context_is_rejected() {
+    let temp = TempDir::new().expect("tempdir");
+    let cwd = temp.path();
+    let run_dir = cwd.join("run");
+    fs::create_dir_all(&run_dir).expect("run dir");
+    fs::write(
+        cwd.join("existing.txt"),
+        "one\nrepeat\nmiddle\nrepeat\nend\n",
+    )
+    .expect("existing file");
+
+    let config = test_config(cwd);
+    let run_control = new_run_control(&config, Duration::from_secs(5));
+    let context = ToolContext::new(
+        cwd,
+        &run_dir,
+        &config,
+        false,
+        &config.shell,
+        &config.shell_args,
+        &run_control,
+    );
+    let patch = "\
+*** Begin Patch
+*** Update File: existing.txt
+@@
+-repeat
++changed
+*** End Patch";
+
+    let error = execute_tool(
+        &context,
+        &["apply_patch".to_string()],
+        "apply_patch",
+        &json!({ "patch": patch }),
+    )
+    .expect_err("ambiguous patch should fail");
+    assert!(matches!(error, AppError::Tool(_)));
+}
+
+#[test]
+fn end_of_file_marker_anchors_last_hunk() {
+    let temp = TempDir::new().expect("tempdir");
+    let cwd = temp.path();
+    let run_dir = cwd.join("run");
+    fs::create_dir_all(&run_dir).expect("run dir");
+    fs::write(cwd.join("existing.txt"), "alpha\nkeep\nalpha\n").expect("existing file");
+
+    let config = test_config(cwd);
+    let run_control = new_run_control(&config, Duration::from_secs(5));
+    let context = ToolContext::new(
+        cwd,
+        &run_dir,
+        &config,
+        false,
+        &config.shell,
+        &config.shell_args,
+        &run_control,
+    );
+    let patch = "\
+*** Begin Patch
+*** Update File: existing.txt
+@@
+ alpha
++omega
+*** End of File
+*** End Patch";
+
+    execute_tool(
+        &context,
+        &["apply_patch".to_string()],
+        "apply_patch",
+        &json!({ "patch": patch }),
+    )
+    .expect("eof anchored patch");
+    assert_eq!(
+        fs::read_to_string(cwd.join("existing.txt")).expect("updated file"),
+        "alpha\nkeep\nalpha\nomega\n"
+    );
+}
+
+#[test]
 fn delete_file_operation_removes_target() {
     let temp = TempDir::new().expect("tempdir");
     let cwd = temp.path();

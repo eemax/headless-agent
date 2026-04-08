@@ -302,6 +302,63 @@ fn glob_absolute_wildcard_patterns_match() {
 }
 
 #[test]
+#[cfg(unix)]
+fn glob_rejects_absolute_patterns_without_literal_prefix() {
+    let temp = TempDir::new().expect("tempdir");
+    let cwd = temp.path();
+    let run_dir = cwd.join("run");
+    fs::create_dir_all(&run_dir).expect("run dir");
+
+    let config = test_config(cwd);
+    let run_control = new_run_control(&config, Duration::from_secs(5));
+    let context = ToolContext::new(
+        cwd,
+        &run_dir,
+        &config,
+        false,
+        &config.shell,
+        &config.shell_args,
+        &run_control,
+    );
+    let error = execute_tool(
+        &context,
+        &["glob".to_string()],
+        "glob",
+        &json!({ "pattern": "/**/*.txt" }),
+    )
+    .expect_err("root wildcard should fail");
+    assert!(matches!(error, headless::error::AppError::Tool(_)));
+}
+
+#[test]
+fn glob_rejects_parent_relative_patterns() {
+    let temp = TempDir::new().expect("tempdir");
+    let cwd = temp.path();
+    let run_dir = cwd.join("run");
+    fs::create_dir_all(&run_dir).expect("run dir");
+
+    let config = test_config(cwd);
+    let run_control = new_run_control(&config, Duration::from_secs(5));
+    let context = ToolContext::new(
+        cwd,
+        &run_dir,
+        &config,
+        false,
+        &config.shell,
+        &config.shell_args,
+        &run_control,
+    );
+    let error = execute_tool(
+        &context,
+        &["glob".to_string()],
+        "glob",
+        &json!({ "pattern": "../*.txt" }),
+    )
+    .expect_err("parent-relative glob should fail");
+    assert!(matches!(error, headless::error::AppError::Tool(_)));
+}
+
+#[test]
 fn glob_absolute_patterns_still_respect_ignored_roots() {
     let temp = TempDir::new().expect("tempdir");
     let cwd = temp.path();

@@ -23,7 +23,7 @@ struct GlobPlan {
 pub fn glob_spec() -> crate::tools::ToolSpec {
     crate::tools::ToolSpec {
         name: "glob",
-        description: "Find files matching a glob pattern. Returns up to 10000 results. Searches hidden files, respects repo and global ignore files, and excludes .git.",
+        description: "Find files matching a glob pattern. Returns up to 10000 results. Searches hidden files, respects repo and global ignore files, excludes .git, rejects parent-directory traversal, and requires a literal prefix for absolute wildcard patterns.",
         parameters: json!({
             "type": "object",
             "properties": {
@@ -37,6 +37,17 @@ pub fn glob_spec() -> crate::tools::ToolSpec {
 pub fn glob_search(context: &ToolContext<'_>, arguments: &Value) -> Result<Value, AppError> {
     let _ = context.remaining_budget()?;
     let pattern = normalize_pattern(&require_string(arguments, "pattern")?);
+    let pattern_path = Path::new(&pattern);
+    if pattern_uses_parent_dirs(pattern_path) {
+        return Err(AppError::Tool(
+            "glob patterns must not traverse parent directories".to_string(),
+        ));
+    }
+    if pattern_path.is_absolute() && !absolute_pattern_has_literal_prefix(pattern_path) {
+        return Err(AppError::Tool(
+            "absolute glob patterns must include at least one literal path component before wildcard expansion".to_string(),
+        ));
+    }
     let plan = build_plan(context.cwd, &pattern);
     let matcher = GlobBuilder::new(&plan.matcher_pattern)
         .literal_separator(true)
@@ -65,7 +76,6 @@ pub fn glob_search(context: &ToolContext<'_>, arguments: &Value) -> Result<Value
     let mut builder = WalkBuilder::new(&plan.walk_root);
     configure_walk_builder(&mut builder, context.cwd);
     builder.max_depth(plan.max_depth);
-    builder.sort_by_file_path(|left, right| left.cmp(right));
     builder.filter_entry(move |entry| should_visit_entry(entry, &subtree_root));
 
     for entry in builder.build() {
@@ -168,6 +178,31 @@ fn component_has_glob_meta(component: &str) -> bool {
     component
         .chars()
         .any(|ch| matches!(ch, '*' | '?' | '[' | '{'))
+}
+
+fn pattern_uses_parent_dirs(pattern: &Path) -> bool {
+    pattern
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+}
+
+fn absolute_pattern_has_literal_prefix(pattern: &Path) -> bool {
+    let mut saw_literal_component = false;
+
+    for component in pattern.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir | Component::CurDir => {}
+            Component::ParentDir => return false,
+            Component::Normal(text) => {
+                if component_has_glob_meta(&text.to_string_lossy()) {
+                    return saw_literal_component;
+                }
+                saw_literal_component = true;
+            }
+        }
+    }
+
+    true
 }
 
 fn remaining_components(pattern: &Path) -> usize {

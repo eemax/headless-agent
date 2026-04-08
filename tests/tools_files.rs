@@ -2,6 +2,9 @@ mod common;
 
 use std::{fs, time::Duration};
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
@@ -44,16 +47,63 @@ fn read_file_truncates_at_default_line_cap_and_reports_total() {
     .expect("read execution");
     let payload: Value = serde_json::from_str(&execution.content).expect("json");
     assert_eq!(payload["ok"], true);
-    assert_eq!(payload["total_lines"], 3000);
     assert_eq!(payload["end_line"], 2000);
+    assert_eq!(payload["total_lines_lower_bound"], 2001);
     assert_eq!(payload["truncated"], true);
-    assert!(payload["note"].as_str().unwrap().contains("3000 lines"));
+    assert!(
+        payload["note"]
+            .as_str()
+            .unwrap()
+            .contains("showing 2000 lines")
+    );
     assert!(
         payload["note"]
             .as_str()
             .unwrap()
             .contains("start_line/end_line")
     );
+}
+
+#[test]
+fn read_file_start_line_only_still_caps_to_default_window() {
+    let temp = TempDir::new().expect("tempdir");
+    let cwd = temp.path();
+    let run_dir = cwd.join("run");
+    fs::create_dir_all(&run_dir).expect("run dir");
+
+    let mut content = String::new();
+    for i in 1..=3000 {
+        content.push_str(&format!("line {i}\n"));
+    }
+    fs::write(cwd.join("big.txt"), &content).expect("big file");
+
+    let config = large_output_config(cwd);
+    let run_control = new_run_control(&config, Duration::from_secs(5));
+    let context = ToolContext::new(
+        cwd,
+        &run_dir,
+        &config,
+        false,
+        &config.shell,
+        &config.shell_args,
+        &run_control,
+    );
+    let execution = execute_tool(
+        &context,
+        &["read_file".to_string()],
+        "read_file",
+        &json!({ "path": "big.txt", "start_line": 500 }),
+    )
+    .expect("read execution");
+    let payload: Value = serde_json::from_str(&execution.content).expect("json");
+    let text = payload["content"].as_str().expect("content");
+    assert_eq!(payload["start_line"], 500);
+    assert_eq!(payload["end_line"], 2499);
+    assert_eq!(payload["truncated"], true);
+    assert_eq!(payload["total_lines_lower_bound"], 2500);
+    assert!(text.contains("line 500"));
+    assert!(text.contains("line 2499"));
+    assert!(!text.contains("line 2500"));
 }
 
 #[test]
@@ -142,6 +192,65 @@ fn read_file_explicit_range_beyond_eof_clamps_end_line() {
 }
 
 #[test]
+fn read_file_rejects_zero_start_line() {
+    let temp = TempDir::new().expect("tempdir");
+    let cwd = temp.path();
+    let run_dir = cwd.join("run");
+    fs::create_dir_all(&run_dir).expect("run dir");
+    fs::write(cwd.join("small.txt"), "line 1\n").expect("small file");
+
+    let config = large_output_config(cwd);
+    let run_control = new_run_control(&config, Duration::from_secs(5));
+    let context = ToolContext::new(
+        cwd,
+        &run_dir,
+        &config,
+        false,
+        &config.shell,
+        &config.shell_args,
+        &run_control,
+    );
+    let error = execute_tool(
+        &context,
+        &["read_file".to_string()],
+        "read_file",
+        &json!({ "path": "small.txt", "start_line": 0 }),
+    )
+    .expect_err("zero start line should fail");
+    assert!(matches!(error, headless::error::AppError::Tool(_)));
+}
+
+#[test]
+fn read_file_rejects_oversized_lines() {
+    let temp = TempDir::new().expect("tempdir");
+    let cwd = temp.path();
+    let run_dir = cwd.join("run");
+    fs::create_dir_all(&run_dir).expect("run dir");
+    fs::write(cwd.join("huge.txt"), vec![b'a'; 1024 * 1024 + 1]).expect("huge line");
+
+    let config = large_output_config(cwd);
+    let run_control = new_run_control(&config, Duration::from_secs(5));
+    let context = ToolContext::new(
+        cwd,
+        &run_dir,
+        &config,
+        false,
+        &config.shell,
+        &config.shell_args,
+        &run_control,
+    );
+    let error = execute_tool(
+        &context,
+        &["read_file".to_string()],
+        "read_file",
+        &json!({ "path": "huge.txt" }),
+    )
+    .expect_err("oversized line should fail");
+    assert!(matches!(error, headless::error::AppError::Tool(_)));
+    assert!(error.to_string().contains("line exceeds"));
+}
+
+#[test]
 fn read_file_small_file_returns_total_lines_without_truncation() {
     let temp = TempDir::new().expect("tempdir");
     let cwd = temp.path();
@@ -184,6 +293,35 @@ fn read_file_small_file_returns_total_lines_without_truncation() {
 }
 
 #[test]
+fn edit_file_rejects_empty_old_text() {
+    let temp = TempDir::new().expect("tempdir");
+    let cwd = temp.path();
+    let run_dir = cwd.join("run");
+    fs::create_dir_all(&run_dir).expect("run dir");
+    fs::write(cwd.join("target.txt"), "aaa\nbbb\n").expect("target file");
+
+    let config = test_config(cwd);
+    let run_control = new_run_control(&config, Duration::from_secs(5));
+    let context = ToolContext::new(
+        cwd,
+        &run_dir,
+        &config,
+        false,
+        &config.shell,
+        &config.shell_args,
+        &run_control,
+    );
+    let error = execute_tool(
+        &context,
+        &["edit_file".to_string()],
+        "edit_file",
+        &json!({ "path": "target.txt", "old_text": "", "new_text": "x" }),
+    )
+    .expect_err("empty old_text should fail");
+    assert!(matches!(error, headless::error::AppError::Tool(_)));
+}
+
+#[test]
 fn edit_file_replaces_single_match() {
     let temp = TempDir::new().expect("tempdir");
     let cwd = temp.path();
@@ -216,6 +354,35 @@ fn edit_file_replaces_single_match() {
         fs::read_to_string(cwd.join("target.txt")).expect("read back"),
         "aaa\nzzz\nccc\n"
     );
+}
+
+#[test]
+fn edit_file_rejects_overlapping_matches() {
+    let temp = TempDir::new().expect("tempdir");
+    let cwd = temp.path();
+    let run_dir = cwd.join("run");
+    fs::create_dir_all(&run_dir).expect("run dir");
+    fs::write(cwd.join("target.txt"), "aaa\n").expect("target file");
+
+    let config = test_config(cwd);
+    let run_control = new_run_control(&config, Duration::from_secs(5));
+    let context = ToolContext::new(
+        cwd,
+        &run_dir,
+        &config,
+        false,
+        &config.shell,
+        &config.shell_args,
+        &run_control,
+    );
+    let error = execute_tool(
+        &context,
+        &["edit_file".to_string()],
+        "edit_file",
+        &json!({ "path": "target.txt", "old_text": "aa", "new_text": "z" }),
+    )
+    .expect_err("overlapping matches should fail");
+    assert!(matches!(error, headless::error::AppError::Tool(_)));
 }
 
 #[test]
@@ -277,6 +444,44 @@ fn edit_file_rejects_multiple_matches() {
 }
 
 #[test]
+#[cfg(unix)]
+fn edit_file_preserves_existing_permissions() {
+    let temp = TempDir::new().expect("tempdir");
+    let cwd = temp.path();
+    let run_dir = cwd.join("run");
+    fs::create_dir_all(&run_dir).expect("run dir");
+    let path = cwd.join("script.sh");
+    fs::write(&path, "echo before\n").expect("script");
+    let mut permissions = fs::metadata(&path).expect("metadata").permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&path, permissions).expect("chmod");
+
+    let config = test_config(cwd);
+    let run_control = new_run_control(&config, Duration::from_secs(5));
+    let context = ToolContext::new(
+        cwd,
+        &run_dir,
+        &config,
+        false,
+        &config.shell,
+        &config.shell_args,
+        &run_control,
+    );
+    execute_tool(
+        &context,
+        &["edit_file".to_string()],
+        "edit_file",
+        &json!({ "path": "script.sh", "old_text": "before", "new_text": "after" }),
+    )
+    .expect("edit execution");
+
+    assert_eq!(
+        fs::metadata(&path).expect("metadata").permissions().mode(),
+        0o100755
+    );
+}
+
+#[test]
 fn write_file_creates_nested_path_with_create_parents() {
     let temp = TempDir::new().expect("tempdir");
     let cwd = temp.path();
@@ -306,6 +511,44 @@ fn write_file_creates_nested_path_with_create_parents() {
     assert_eq!(
         fs::read_to_string(cwd.join("a/b/c/deep.txt")).expect("read back"),
         "nested"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn write_file_preserves_existing_permissions() {
+    let temp = TempDir::new().expect("tempdir");
+    let cwd = temp.path();
+    let run_dir = cwd.join("run");
+    fs::create_dir_all(&run_dir).expect("run dir");
+    let path = cwd.join("script.sh");
+    fs::write(&path, "echo before\n").expect("script");
+    let mut permissions = fs::metadata(&path).expect("metadata").permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&path, permissions).expect("chmod");
+
+    let config = test_config(cwd);
+    let run_control = new_run_control(&config, Duration::from_secs(5));
+    let context = ToolContext::new(
+        cwd,
+        &run_dir,
+        &config,
+        false,
+        &config.shell,
+        &config.shell_args,
+        &run_control,
+    );
+    execute_tool(
+        &context,
+        &["write_file".to_string()],
+        "write_file",
+        &json!({ "path": "script.sh", "content": "echo after\n" }),
+    )
+    .expect("write execution");
+
+    assert_eq!(
+        fs::metadata(&path).expect("metadata").permissions().mode(),
+        0o100755
     );
 }
 
