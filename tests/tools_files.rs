@@ -251,6 +251,36 @@ fn read_file_rejects_oversized_lines() {
 }
 
 #[test]
+fn read_file_rejects_invalid_utf8() {
+    let temp = TempDir::new().expect("tempdir");
+    let cwd = temp.path();
+    let run_dir = cwd.join("run");
+    fs::create_dir_all(&run_dir).expect("run dir");
+    fs::write(cwd.join("binary.txt"), vec![0xff, 0xfe, b'\n']).expect("binary file");
+
+    let config = large_output_config(cwd);
+    let run_control = new_run_control(&config, Duration::from_secs(5));
+    let context = ToolContext::new(
+        cwd,
+        &run_dir,
+        &config,
+        false,
+        &config.shell,
+        &config.shell_args,
+        &run_control,
+    );
+    let error = execute_tool(
+        &context,
+        &["read_file".to_string()],
+        "read_file",
+        &json!({ "path": "binary.txt" }),
+    )
+    .expect_err("invalid utf8 should fail");
+    assert!(matches!(error, headless::error::AppError::Tool(_)));
+    assert!(error.to_string().contains("not valid UTF-8"));
+}
+
+#[test]
 fn read_file_small_file_returns_total_lines_without_truncation() {
     let temp = TempDir::new().expect("tempdir");
     let cwd = temp.path();

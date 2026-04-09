@@ -309,6 +309,46 @@ fn end_of_file_marker_anchors_last_hunk() {
 }
 
 #[test]
+fn end_of_file_marker_allows_context_free_append() {
+    let temp = TempDir::new().expect("tempdir");
+    let cwd = temp.path();
+    let run_dir = cwd.join("run");
+    fs::create_dir_all(&run_dir).expect("run dir");
+    fs::write(cwd.join("existing.txt"), "alpha\n").expect("existing file");
+
+    let config = test_config(cwd);
+    let run_control = new_run_control(&config, Duration::from_secs(5));
+    let context = ToolContext::new(
+        cwd,
+        &run_dir,
+        &config,
+        false,
+        &config.shell,
+        &config.shell_args,
+        &run_control,
+    );
+    let patch = "\
+*** Begin Patch
+*** Update File: existing.txt
+@@
++omega
+*** End of File
+*** End Patch";
+
+    execute_tool(
+        &context,
+        &["apply_patch".to_string()],
+        "apply_patch",
+        &json!({ "patch": patch }),
+    )
+    .expect("eof anchored append");
+    assert_eq!(
+        fs::read_to_string(cwd.join("existing.txt")).expect("updated file"),
+        "alpha\nomega\n"
+    );
+}
+
+#[test]
 fn delete_file_operation_removes_target() {
     let temp = TempDir::new().expect("tempdir");
     let cwd = temp.path();

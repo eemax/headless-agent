@@ -176,6 +176,9 @@ pub fn grep_search(context: &ToolContext<'_>, arguments: &Value) -> Result<Value
 }
 
 fn stderr_has_only_nonfatal_path_errors(stderr: &str) -> bool {
+    // This intentionally tracks ripgrep's current path-error format (`rg: ... (os error N)`).
+    // If ripgrep changes that shape, we prefer falling back to a fatal tool error over
+    // silently marking arbitrary stderr as a partial-success condition.
     !stderr.is_empty()
         && stderr
             .lines()
@@ -426,5 +429,22 @@ fn collect_rg_parser(
     match handle.join() {
         Ok(result) => result,
         Err(_) => Err(AppError::Tool("ripgrep parser thread panicked".to_string())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stderr_has_only_nonfatal_path_errors;
+
+    #[test]
+    fn stderr_nonfatal_path_error_shape_is_accepted() {
+        let stderr = "rg: secret.txt: Permission denied (os error 13)\nrg: locked: Operation not permitted (os error 1)";
+        assert!(stderr_has_only_nonfatal_path_errors(stderr));
+    }
+
+    #[test]
+    fn stderr_with_non_path_error_is_rejected() {
+        let stderr = "regex parse error:\n    (\n    ^\nerror: unclosed group";
+        assert!(!stderr_has_only_nonfatal_path_errors(stderr));
     }
 }

@@ -1,14 +1,14 @@
-name = "coder"
-description = "General coding agent"
+name = "flash"
+description = "Very fast model for testing"
 
 base_url = "https://openrouter.ai/api/v1"
 api_key = ""
 api_key_env = "OPENROUTER_API_KEY"
 
-default_model = "z-ai/glm-5.1"
-default_effort = "high"
-max_output_tokens = 32000
-compaction_at_tokens = 160000
+default_model = "qwen/qwen3.5-flash-02-23"
+default_effort = "none"
+max_output_tokens = 64000
+compaction_at_tokens = 500000
 
 skills_dir = "./skills"
 enabled_skills = []
