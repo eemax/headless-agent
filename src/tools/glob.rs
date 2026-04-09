@@ -76,6 +76,7 @@ pub fn glob_search(context: &ToolContext<'_>, arguments: &Value) -> Result<Value
     let mut builder = WalkBuilder::new(&plan.walk_root);
     configure_walk_builder(&mut builder, context.cwd);
     builder.max_depth(plan.max_depth);
+    builder.sort_by_file_path(|left, right| left.cmp(right));
     builder.filter_entry(move |entry| should_visit_entry(entry, &subtree_root));
 
     for entry in builder.build() {

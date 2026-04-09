@@ -3,7 +3,7 @@ mod common;
 use std::{fs, time::Duration};
 
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{PermissionsExt, symlink};
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -482,6 +482,47 @@ fn edit_file_preserves_existing_permissions() {
 }
 
 #[test]
+#[cfg(unix)]
+fn edit_file_through_symlink_updates_target() {
+    let temp = TempDir::new().expect("tempdir");
+    let cwd = temp.path();
+    let run_dir = cwd.join("run");
+    fs::create_dir_all(&run_dir).expect("run dir");
+    let target = cwd.join("target.txt");
+    let link = cwd.join("link.txt");
+    fs::write(&target, "before\n").expect("target file");
+    symlink(&target, &link).expect("symlink");
+
+    let config = test_config(cwd);
+    let run_control = new_run_control(&config, Duration::from_secs(5));
+    let context = ToolContext::new(
+        cwd,
+        &run_dir,
+        &config,
+        false,
+        &config.shell,
+        &config.shell_args,
+        &run_control,
+    );
+    execute_tool(
+        &context,
+        &["edit_file".to_string()],
+        "edit_file",
+        &json!({ "path": "link.txt", "old_text": "before", "new_text": "after" }),
+    )
+    .expect("edit execution");
+
+    assert!(
+        fs::symlink_metadata(&link)
+            .expect("metadata")
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(fs::read_to_string(&target).expect("target"), "after\n");
+    assert_eq!(fs::read_to_string(&link).expect("link"), "after\n");
+}
+
+#[test]
 fn write_file_creates_nested_path_with_create_parents() {
     let temp = TempDir::new().expect("tempdir");
     let cwd = temp.path();
@@ -550,6 +591,88 @@ fn write_file_preserves_existing_permissions() {
         fs::metadata(&path).expect("metadata").permissions().mode(),
         0o100755
     );
+}
+
+#[test]
+#[cfg(unix)]
+fn write_file_new_file_matches_plain_fs_write_permissions() {
+    let temp = TempDir::new().expect("tempdir");
+    let cwd = temp.path();
+    let run_dir = cwd.join("run");
+    fs::create_dir_all(&run_dir).expect("run dir");
+
+    let config = test_config(cwd);
+    let run_control = new_run_control(&config, Duration::from_secs(5));
+    let context = ToolContext::new(
+        cwd,
+        &run_dir,
+        &config,
+        false,
+        &config.shell,
+        &config.shell_args,
+        &run_control,
+    );
+    execute_tool(
+        &context,
+        &["write_file".to_string()],
+        "write_file",
+        &json!({ "path": "tool.txt", "content": "tool\n" }),
+    )
+    .expect("write execution");
+    fs::write(cwd.join("plain.txt"), "plain\n").expect("plain write");
+
+    let tool_mode = fs::metadata(cwd.join("tool.txt"))
+        .expect("tool metadata")
+        .permissions()
+        .mode()
+        & 0o777;
+    let plain_mode = fs::metadata(cwd.join("plain.txt"))
+        .expect("plain metadata")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(tool_mode, plain_mode);
+}
+
+#[test]
+#[cfg(unix)]
+fn write_file_through_symlink_updates_target() {
+    let temp = TempDir::new().expect("tempdir");
+    let cwd = temp.path();
+    let run_dir = cwd.join("run");
+    fs::create_dir_all(&run_dir).expect("run dir");
+    let target = cwd.join("target.txt");
+    let link = cwd.join("link.txt");
+    fs::write(&target, "before\n").expect("target file");
+    symlink(&target, &link).expect("symlink");
+
+    let config = test_config(cwd);
+    let run_control = new_run_control(&config, Duration::from_secs(5));
+    let context = ToolContext::new(
+        cwd,
+        &run_dir,
+        &config,
+        false,
+        &config.shell,
+        &config.shell_args,
+        &run_control,
+    );
+    execute_tool(
+        &context,
+        &["write_file".to_string()],
+        "write_file",
+        &json!({ "path": "link.txt", "content": "after\n" }),
+    )
+    .expect("write execution");
+
+    assert!(
+        fs::symlink_metadata(&link)
+            .expect("metadata")
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(fs::read_to_string(&target).expect("target"), "after\n");
+    assert_eq!(fs::read_to_string(&link).expect("link"), "after\n");
 }
 
 #[test]

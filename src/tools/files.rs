@@ -1,11 +1,11 @@
 use std::{
     fs::{self, File},
     io::{BufRead, BufReader, Write},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use serde_json::{Value, json};
-use tempfile::NamedTempFile;
+use tempfile::{Builder, NamedTempFile};
 
 use crate::{
     error::AppError,
@@ -301,8 +301,9 @@ fn ensure_parent_dir(path: &Path, create_parents: bool) -> Result<(), AppError> 
 }
 
 fn write_text_atomic(path: &Path, content: &str) -> Result<(), AppError> {
-    let parent = path.parent().unwrap_or(Path::new("."));
-    let permissions = match fs::metadata(path) {
+    let target_path = resolve_write_target(path)?;
+    let parent = target_path.parent().unwrap_or(Path::new("."));
+    let permissions = match fs::metadata(&target_path) {
         Ok(metadata) if metadata.is_dir() => {
             return Err(AppError::Tool(format!(
                 "failed to write file {}: path is a directory",
@@ -319,12 +320,7 @@ fn write_text_atomic(path: &Path, content: &str) -> Result<(), AppError> {
         }
     };
 
-    let mut temp = NamedTempFile::new_in(parent).map_err(|err| {
-        AppError::Tool(format!(
-            "failed to create temp file in {}: {err}",
-            parent.display()
-        ))
-    })?;
+    let mut temp = create_temp_write_file(parent, path, permissions.is_some())?;
     if let Some(permissions) = permissions {
         temp.as_file().set_permissions(permissions).map_err(|err| {
             AppError::Tool(format!("failed to write file {}: {err}", path.display()))
@@ -332,7 +328,7 @@ fn write_text_atomic(path: &Path, content: &str) -> Result<(), AppError> {
     }
     temp.write_all(content.as_bytes())
         .map_err(|err| AppError::Tool(format!("failed to write file {}: {err}", path.display())))?;
-    temp.persist(path).map_err(|err| {
+    temp.persist(&target_path).map_err(|err| {
         AppError::Tool(format!(
             "failed to write file {}: {}",
             path.display(),
@@ -340,4 +336,42 @@ fn write_text_atomic(path: &Path, content: &str) -> Result<(), AppError> {
         ))
     })?;
     Ok(())
+}
+
+fn resolve_write_target(path: &Path) -> Result<PathBuf, AppError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            // Preserve fs::write semantics by updating the symlink target in place.
+            fs::canonicalize(path).map_err(|err| {
+                AppError::Tool(format!("failed to write file {}: {err}", path.display()))
+            })
+        }
+        Ok(_) => Ok(path.to_path_buf()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(path.to_path_buf()),
+        Err(err) => Err(AppError::Tool(format!(
+            "failed to write file {}: {err}",
+            path.display()
+        ))),
+    }
+}
+
+fn create_temp_write_file(
+    parent: &Path,
+    path: &Path,
+    preserve_existing_permissions: bool,
+) -> Result<NamedTempFile, AppError> {
+    let mut builder = Builder::new();
+    #[cfg(unix)]
+    if !preserve_existing_permissions {
+        use std::os::unix::fs::PermissionsExt;
+
+        builder.permissions(fs::Permissions::from_mode(0o666));
+    }
+    builder.tempfile_in(parent).map_err(|err| {
+        AppError::Tool(format!(
+            "failed to create temp file in {} for {}: {err}",
+            parent.display(),
+            path.display()
+        ))
+    })
 }

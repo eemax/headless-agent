@@ -541,8 +541,8 @@ fn glob_truncation_includes_result_limit_and_note() {
     let run_dir = cwd.join("run");
     fs::create_dir_all(&run_dir).expect("run dir");
 
-    // Create 10001 files to trigger the 10000 limit
-    for i in 0..10_001 {
+    // Create in reverse order so only a sorted walk returns the earliest 10000 paths.
+    for i in (0..10_001).rev() {
         fs::write(cwd.join(format!("file_{i:05}.txt")), "x").expect("file");
     }
 
@@ -565,8 +565,13 @@ fn glob_truncation_includes_result_limit_and_note() {
     )
     .expect("glob execution");
     let payload: Value = serde_json::from_str(&execution.content).expect("json");
+    let matches = payload["matches"].as_array().expect("matches array");
     assert_eq!(payload["truncated"], true);
     assert_eq!(payload["result_limit"], 10_000);
+    assert_eq!(matches.len(), 10_000);
+    assert_eq!(matches[0], "file_00000.txt");
+    assert_eq!(matches[9_999], "file_09999.txt");
+    assert!(!matches.iter().any(|value| value == "file_10000.txt"));
     assert!(payload["note"].as_str().unwrap().contains("10000 paths"));
 }
 
