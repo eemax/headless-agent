@@ -1,0 +1,35 @@
+name: "example-greeting-module"
+description: "Build a simple greeting module end to end as a test of the orchestrator"
+pipeline: code-review-loop
+cwd: /tmp/orchestrator-test
+
+steps:
+  - id: scaffold
+    goal: "Create a Python module at src/greeting.py with a greet(name: str) -> str function that returns a greeting string, and an __init__.py that exports it."
+    plan: |
+      Create the directory structure:
+        src/__init__.py
+        src/greeting.py
+      The greet function should accept a name and return "Hello, {name}!" with input validation (name must be a non-empty string).
+    depends_on: []
+
+  - id: test
+    goal: "Write comprehensive pytest tests for the greeting module at tests/test_greeting.py"
+    plan: |
+      Create tests/test_greeting.py with tests covering:
+        - Normal greeting with a valid name
+        - Empty string input raises ValueError
+        - Non-string input raises TypeError
+        - Unicode names work correctly
+      Import from src.greeting. Include a conftest.py if needed for path setup.
+    depends_on: [scaffold]
+
+  - id: readme
+    goal: "Create a README.md documenting the greeting module with usage examples"
+    plan: |
+      Create README.md at the project root with:
+        - Module description
+        - Installation (just mention it's a local module)
+        - Usage example showing greet() being called
+        - Test running instructions (pytest)
+    depends_on: [scaffold]

@@ -1,0 +1,4 @@
+name = "orchestrator"
+description = "Superteam plan executor role"
+system_prompt_file = "../prompts/orchestrator-role.md"
+user_prefix_file = "../prompts/orchestrator-user.md"

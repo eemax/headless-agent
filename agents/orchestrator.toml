@@ -1,0 +1,25 @@
+name = "orchestrator"
+description = "Plan executor that drives superteam builder/auditor loops"
+
+base_url = "https://openrouter.ai/api/v1"
+api_key = ""
+api_key_env = "OPENROUTER_API_KEY"
+
+default_model = "anthropic/claude-sonnet-4"
+default_effort = "high"
+max_output_tokens = 12000
+compaction_at_tokens = 180000
+
+skills_dir = "./skills"
+enabled_skills = []
+
+enabled_tools = [
+  "read_file",
+  "glob",
+  "grep",
+  "bash",
+]
+
+system_prompt_file = "../prompts/orchestrator.md"
+
+timeout = "4h"
